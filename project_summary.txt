@@ -1,0 +1,61 @@
+NOVA - Navigation & Object Visualization Assistant
+==================================================
+
+Project Overview
+----------------
+NOVA is an AI-powered assistive application designed to help visually impaired users navigate their environment, identify objects and faces, and read text. It combines a Flutter-based mobile application with a powerful Python FastAPI backend for real-time inference.
+
+Architecture
+------------
+- **Frontend**: Flutter (Mobile Application)
+  - Handles UI, Camera, Text-to-Speech (TTS), and User Input.
+  - Communicates with the backend via REST API.
+  - Features high-contrast accessibility modes and voice feedback.
+
+- **Backend**: FastAPI (Python)
+  - Hosts AI models for processing images.
+  - **Object Detection**: YOLOv8 (Detects 80 class objects + custom objects).
+  - **Depth Estimation**: MiDaS (Estimates distance to obstacles).
+  - **OCR**: PaddleOCR / EasyOCR (Reads text from environment).
+  - **Face Recognition**: InsightFace/ArcFace (Identifies known people).
+
+Key Features
+------------
+1. **Navigation Mode** 🚶
+   - Real-time obstacle detection.
+   - Depth estimation to warn about close objects.
+   - Voice guidance for safe path finding.
+
+2. **Reading Mode** 📖
+   - Optical Character Recognition (OCR) to read text aloud.
+   - Ideal for reading signs, documents, and labels.
+
+3. **Recognition Mode** 👁️
+   - **Object Recognition**: Identifies objects and describes them.
+     - Custom Object Registration: Users can register specific objects (e.g., "My Keys").
+   - **Face Recognition**: Identifies people in view.
+     - Face Registration: Users can register faces with names (e.g., "Family Member").
+
+4. **Emergency Features** 🚨
+   - **Emergency Contacts**: Dedicated screen to manage and quickly call emergency numbers.
+   - SOS functionality for immediate assistance.
+
+5. **Settings & Customization** ⚙️
+   - **Voice**: Adjustable speech rate and volume.
+   - **Detection**: Configurable frame rates and confidence thresholds.
+   - **Accessibility**: High contrast mode, large text, haptic feedback.
+   - **Backend**: Configurable server IP and port.
+
+Technological Stack
+-------------------
+- **Mobile**: Flutter, Dart, `flutter_tts`, `camera`, `speech_to_text`, `shared_preferences`.
+- **Server**: Python 3.9+, FastAPI, Uvicorn.
+- **AI/ML**: PyTorch, TensorFlow Lite, OpenCV, NumPy.
+
+Recent Updates
+--------------
+- Enabled all three detection modes (Navigation, Reading, Recognition).
+- Implemented comprehensive Settings Screen.
+- Added Emergency Contact management.
+- Added Face and Object Registration features.
+- Optimized backend for real-time processing.

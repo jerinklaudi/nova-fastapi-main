@@ -1,0 +1,6 @@
+models/*.pt filter=lfs diff=lfs merge=lfs -text
+models/*.tflite filter=lfs diff=lfs merge=lfs -text
+venv/Lib/site-packages/torch/lib/*.dll filter=lfs diff=lfs merge=lfs -text
+venv/Lib/site-packages/tensorflow/python/*.dll filter=lfs diff=lfs merge=lfs -text
+venv/Lib/site-packages/clang/native/*.dll filter=lfs diff=lfs merge=lfs -text
+venv/Lib/site-packages/cv2/*.pyd filter=lfs diff=lfs merge=lfs -text
