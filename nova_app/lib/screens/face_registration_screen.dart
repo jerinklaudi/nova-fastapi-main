@@ -1,184 +1,218 @@
+import 'dart:async';
 import 'dart:io';
+
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
 
-class FaceData {
-  final String id;
-  final String name;
-  final String imagePath;
+import '../services/api_service.dart';
 
-  FaceData({
-    required this.id,
-    required this.name,
-    required this.imagePath,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'imagePath': imagePath,
-      };
-
-  factory FaceData.fromJson(Map<String, dynamic> json) => FaceData(
-        id: json['id'],
-        name: json['name'],
-        imagePath: json['imagePath'],
-      );
-}
-
+/// Camera-based face registration screen.
+/// Opened from SettingsScreen with the person's name already provided.
+/// Automatically captures [_targetFrames] frames at [_captureIntervalMs] ms intervals.
 class FaceRegistrationScreen extends StatefulWidget {
-  const FaceRegistrationScreen({super.key});
+  final String personName;
+
+  const FaceRegistrationScreen({super.key, required this.personName});
 
   @override
   State<FaceRegistrationScreen> createState() => _FaceRegistrationScreenState();
 }
 
 class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
-  List<FaceData> _faces = [];
-  final ImagePicker _picker = ImagePicker();
+  static const int _targetFrames = 20;
+  static const int _minAccepted = 5;
+  static const int _captureIntervalMs =
+      800; // increased from 400ms to reduce backend load
+
+  CameraController? _cameraController;
+  bool _cameraReady = false;
+  bool _isCapturing = false;
+  bool _isSaving = false;
+  bool _isDone = false;
+
+  int _framesSent = 0;
+  int _framesAccepted = 0;
+  String _status = 'Initializing camera...';
+
+  Timer? _captureTimer;
 
   @override
   void initState() {
     super.initState();
-    _loadFaces();
+    _initCamera();
   }
 
-  Future<void> _loadFaces() async {
-    final prefs = await SharedPreferences.getInstance();
-    final facesJson = prefs.getString('registered_faces');
-    if (facesJson != null) {
-      final List<dynamic> decoded = jsonDecode(facesJson);
-      setState(() {
-        _faces = decoded.map((e) => FaceData.fromJson(e)).toList();
-      });
+  Future<void> _initCamera() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        setState(() => _status = 'No cameras found.');
+        return;
+      }
+
+      // Auto-select front camera
+      final cam = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.first,
+      );
+
+      _cameraController = CameraController(
+        cam,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
+
+      await _cameraController!.initialize();
+
+      if (mounted) {
+        setState(() {
+          _cameraReady = true;
+          _status = 'Starting capture...';
+        });
+
+        // Auto-start capture immediately
+        _startCapture();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _status = 'Camera error: $e');
+      }
     }
   }
 
-  Future<void> _saveFaces() async {
-    final prefs = await SharedPreferences.getInstance();
-    final facesJson = jsonEncode(_faces.map((e) => e.toJson()).toList());
-    await prefs.setString('registered_faces', facesJson);
+  void _startCapture() {
+    if (!_cameraReady || _isCapturing) return;
+    setState(() {
+      _isCapturing = true;
+      _framesSent = 0;
+      _framesAccepted = 0;
+      _status = 'Capturing... Please look at the camera.';
+    });
+
+    _captureTimer = Timer.periodic(
+      const Duration(milliseconds: _captureIntervalMs),
+      (timer) async {
+        if (_framesSent >= _targetFrames) {
+          timer.cancel();
+          await _finishCapture();
+          return;
+        }
+        await _captureOneFrame();
+      },
+    );
   }
 
-  Future<void> _captureFace() async {
-    final XFile? image = await _picker.pickImage(
-      source: ImageSource.camera,
-      preferredCameraDevice: CameraDevice.front,
-    );
+  Future<void> _captureOneFrame() async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized)
+      return;
 
-    if (image != null && mounted) {
-      _showNameDialog(image.path);
+    // Throttle to prevent multiple active takePicture calls
+    if (_cameraController!.value.isTakingPicture) return;
+
+    try {
+      final XFile xfile = await _cameraController!.takePicture();
+      final File imageFile = File(xfile.path);
+      _framesSent++;
+
+      final result = await ApiService.registerFaceFrame(
+        name: widget.personName,
+        imageFile: imageFile,
+      );
+
+      debugPrint('[FACE REG] Frame API response: $result');
+
+      if (result['accepted'] == true) {
+        _framesAccepted++;
+        if (mounted) {
+          setState(() {
+            _status =
+                'Captured $_framesAccepted / $_targetFrames valid frames...';
+          });
+        }
+      } else {
+        // Show rejection reason so the user can adjust
+        final reason = result['message'] as String? ?? 'Frame rejected';
+        debugPrint('[FACE REG] Frame rejected: $reason');
+        if (mounted) {
+          setState(() {
+            _status = '$reason';
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('[FACE REG] Error capturing frame: $e');
+      if (mounted) {
+        setState(() => _status = 'Network error — retrying...');
+      }
     }
   }
 
-  void _showNameDialog(String imagePath) {
-    final nameController = TextEditingController();
+  Future<void> _finishCapture() async {
+    if (_framesAccepted < _minAccepted) {
+      try {
+        await ApiService.cancelRegistration(widget.personName);
+      } catch (_) {
+        // Best effort cleanup; ignore cancel failures.
+      }
+      if (mounted) {
+        setState(() {
+          _isCapturing = false;
+          _status =
+              'Only $_framesAccepted clear frames captured (need $_minAccepted).\n'
+              'Registration failed. Please close and try again in better lighting.';
+        });
+      }
+      return;
+    }
 
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text(
-          'Register Face',
-          style: TextStyle(color: Colors.yellow),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.file(
-                File(imagePath),
-                height: 200,
-                width: 200,
-                fit: BoxFit.cover,
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: nameController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'Name',
-                labelStyle: TextStyle(color: Colors.grey),
-                hintText: 'e.g., Mom, Dad, Friend',
-                hintStyle: TextStyle(color: Colors.grey),
-                enabledBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.grey),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderSide: BorderSide(color: Colors.yellow),
-                ),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
-          ),
-          TextButton(
-            onPressed: () {
-              if (nameController.text.isNotEmpty) {
-                setState(() {
-                  _faces.add(FaceData(
-                    id: DateTime.now().toString(),
-                    name: nameController.text,
-                    imagePath: imagePath,
-                  ));
-                });
-                _saveFaces();
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('${nameController.text} registered!'),
-                    backgroundColor: Colors.green,
-                  ),
-                );
-              }
-            },
-            child: const Text('Save', style: TextStyle(color: Colors.yellow)),
-          ),
-        ],
-      ),
-    );
+    setState(() {
+      _isCapturing = false;
+      _isSaving = true;
+      _status = 'Saving registration...';
+    });
+
+    try {
+      final result = await ApiService.saveRegistration(widget.personName);
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+          _isDone = true;
+          _status = result['message'] as String? ??
+              '${widget.personName} registered successfully!';
+        });
+
+        // Auto-close after 2.5s on success
+        Future.delayed(const Duration(milliseconds: 2500), () {
+          if (mounted) Navigator.of(context).pop(true);
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+          _status = 'Failed to save: $e';
+        });
+      }
+    }
   }
 
-  void _deleteFace(FaceData face) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('Delete Face', style: TextStyle(color: Colors.yellow)),
-        content: Text(
-          'Delete ${face.name}?',
-          style: const TextStyle(color: Colors.white),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
-          ),
-          TextButton(
-            onPressed: () {
-              setState(() => _faces.remove(face));
-              _saveFaces();
-              // Delete image file
-              try {
-                File(face.imagePath).deleteSync();
-              } catch (e) {
-                print('Error deleting image: $e');
-              }
-              Navigator.pop(context);
-            },
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
+  Future<void> _cancel() async {
+    _captureTimer?.cancel();
+    if (_framesSent > 0 && !_isSaving && !_isDone) {
+      try {
+        await ApiService.cancelRegistration(widget.personName);
+      } catch (_) {
+        // Best effort cleanup; ignore cancel failures.
+      }
+    }
+    if (mounted) Navigator.of(context).pop(false);
+  }
+
+  @override
+  void dispose() {
+    _captureTimer?.cancel();
+    _cameraController?.dispose();
+    super.dispose();
   }
 
   @override
@@ -186,77 +220,67 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
+        title: Text('Register: ${widget.personName}'),
         backgroundColor: Colors.black,
-        title: const Text(
-          'Face Registration',
-          style: TextStyle(color: Colors.yellow),
+        foregroundColor: Colors.yellow,
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: _cancel,
         ),
-        iconTheme: const IconThemeData(color: Colors.yellow),
       ),
-      body: _faces.isEmpty
-          ? const Center(
-              child: Text(
-                'No faces registered.\nTap + to register a face.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey, fontSize: 16),
-              ),
-            )
-          : GridView.builder(
-              padding: const EdgeInsets.all(16),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-                childAspectRatio: 0.75,
-              ),
-              itemCount: _faces.length,
-              itemBuilder: (context, index) {
-                final face = _faces[index];
-                return Card(
-                  color: Colors.grey[900],
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Expanded(
-                        child: ClipRRect(
-                          borderRadius: const BorderRadius.vertical(
-                            top: Radius.circular(4),
-                          ),
-                          child: Image.file(
-                            File(face.imagePath),
-                            fit: BoxFit.cover,
-                          ),
-                        ),
+      body: Column(
+        children: [
+          // Camera preview
+          Expanded(
+            child: _cameraReady
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(20),
+                        child: CameraPreview(_cameraController!),
                       ),
-                      Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: Column(
-                          children: [
-                            Text(
-                              face.name,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                            const SizedBox(height: 4),
-                            IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () => _deleteFace(face),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                    ),
+                  )
+                : const Center(
+                    child: CircularProgressIndicator(color: Colors.yellow),
                   ),
-                );
-              },
+          ),
+
+          // Progress bar
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(
+                value: _targetFrames > 0
+                    ? (_framesAccepted / _targetFrames).clamp(0.0, 1.0)
+                    : 0,
+                backgroundColor: Colors.grey[900],
+                color: _isDone
+                    ? Colors.green
+                    : (_framesAccepted >= _minAccepted
+                        ? Colors.yellow
+                        : Colors.orange),
+                minHeight: 12,
+              ),
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _captureFace,
-        backgroundColor: Colors.yellow,
-        child: const Icon(Icons.camera_alt, color: Colors.black),
+          ),
+
+          // Status text
+          Padding(
+            padding: const EdgeInsets.only(left: 24, right: 24, bottom: 48),
+            child: Text(
+              _status,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: _isDone ? Colors.green : Colors.yellow,
+                fontSize: 16,
+                fontWeight: _isDone ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

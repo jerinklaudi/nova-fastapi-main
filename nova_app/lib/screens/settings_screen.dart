@@ -3,6 +3,7 @@ import '../models/app_settings.dart';
 import '../services/settings_service.dart';
 import 'emergency_contacts_screen.dart';
 import 'face_registration_screen.dart';
+import 'face_management_screen.dart';
 import 'object_registration_screen.dart';
 import 'about_screen.dart';
 
@@ -238,14 +239,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           // Face Registration
           _buildNavigationTile(
-            icon: Icons.face,
-            title: 'Face Registration',
-            subtitle: 'Register known faces for recognition',
+            icon: Icons.face_retouching_natural,
+            title: 'Register a Face',
+            subtitle: 'Add a new person to recognition',
+            onTap: () async {
+              final name = await _showNameDialog(context);
+              if (name == null || name.trim().isEmpty) return;
+              
+              if (context.mounted) {
+                final success = await Navigator.push<bool>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => FaceRegistrationScreen(personName: name.trim()),
+                  ),
+                );
+                
+                if (success == true && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('${name.trim()} successfully registered!'),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                }
+              }
+            },
+          ),
+          
+          const SizedBox(height: 12),
+          
+          // Face Management
+          _buildNavigationTile(
+            icon: Icons.manage_accounts,
+            title: 'Manage Registered Faces',
+            subtitle: 'View or delete registered people',
             onTap: () {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => const FaceRegistrationScreen(),
+                  builder: (_) => const FaceManagementScreen(),
                 ),
               );
             },
@@ -401,6 +433,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         trailing: const Icon(Icons.arrow_forward_ios, color: Colors.grey, size: 16),
         onTap: onTap,
+      ),
+    );
+  }
+
+  Future<String?> _showNameDialog(BuildContext context) {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('Enter Person\'s Name', style: TextStyle(color: Colors.yellow)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(
+            hintText: 'e.g. Alice, Bob',
+            hintStyle: TextStyle(color: Colors.grey),
+            enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.grey)),
+            focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.yellow)),
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Next', style: TextStyle(color: Colors.yellow)),
+          ),
+        ],
       ),
     );
   }

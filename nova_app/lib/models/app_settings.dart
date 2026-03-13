@@ -1,3 +1,5 @@
+import '../core/config.dart';
+
 /// App settings model for NOVA
 class AppSettings {
   // Voice & Audio Settings
@@ -34,8 +36,8 @@ class AppSettings {
     this.highContrast = false,
     this.largeText = false,
     // Advanced defaults
-    this.backendHost = '10.135.136.76',
-    this.backendPort = 8000,
+    this.backendHost = NovaConfig.backendHost,
+    this.backendPort = NovaConfig.backendPort,
     this.debugMode = false,
   });
 
@@ -51,8 +53,8 @@ class AppSettings {
       hapticFeedback: json['hapticFeedback'] ?? false,
       highContrast: json['highContrast'] ?? false,
       largeText: json['largeText'] ?? false,
-      backendHost: json['backendHost'] ?? '10.135.136.76',
-      backendPort: json['backendPort'] ?? 8000,
+      backendHost: json['backendHost'] ?? NovaConfig.backendHost,
+      backendPort: json['backendPort'] ?? NovaConfig.backendPort,
       debugMode: json['debugMode'] ?? false,
     );
   }

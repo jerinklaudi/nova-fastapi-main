@@ -312,22 +312,16 @@ class NavigationGuidance {
 class NavigationGuidanceResponse {
   final NavigationGuidance guidance;
   final double inferenceTimeMs;
-  final bool ready;
-  final String debugDepth;
 
   NavigationGuidanceResponse({
     required this.guidance,
     required this.inferenceTimeMs,
-    this.ready = false,
-    this.debugDepth = 'N/A',
   });
 
   factory NavigationGuidanceResponse.fromJson(Map<String, dynamic> json) {
     return NavigationGuidanceResponse(
       guidance: NavigationGuidance.fromJson(json['guidance'] as Map<String, dynamic>),
       inferenceTimeMs: (json['inference_time_ms'] as num? ?? 0.0).toDouble(),
-      ready: json['ready'] as bool? ?? false,
-      debugDepth: json['debug_depth'] as String? ?? 'N/A',
     );
   }
 }

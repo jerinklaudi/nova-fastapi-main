@@ -1,0 +1,22 @@
+{
+  "image": "C:\\Users\\jerin\\Desktop\\Jerin\\SRM\\Semesters\\Semester 8\\Major Project\\NOVA\\nova-fastapi-main\\models\\image.png",
+  "backend_url": "http://10.62.137.189:8000",
+  "frames": 30,
+  "parallel_mean_ms": 421.1,
+  "ocr_mean_ms": 0.25,
+  "object_latency_ms": {
+    "mean": 105.31,
+    "std": 11.69,
+    "min": 84.12,
+    "max": 134.72
+  },
+  "depth_latency_ms": {
+    "mean": 120.63,
+    "std": 34.63,
+    "min": 87.25,
+    "max": 274.0
+  },
+  "num_object_conf_samples": 0,
+  "num_depth_quality_samples": 30,
+  "num_ocr_conf_samples": 0
+}

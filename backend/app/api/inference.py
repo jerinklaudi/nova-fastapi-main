@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException, Query
+from fastapi import APIRouter, File, UploadFile, HTTPException, Query, Form
 from fastapi.responses import JSONResponse
 from typing import List, Optional
 import time
@@ -7,8 +7,8 @@ import numpy as np
 from app.core.logging import setup_logging, get_logger
 from app.core.config import settings
 from app.models.yolo_detector import YOLODetector
-from app.models.face_detector import FaceDetector
-from app.models.sface_detector import SFaceDetector
+from app.models.face_recognition_module.face_detector import FaceDetector
+from app.models.face_recognition_module.face_recognizer import FaceRecognizer
 from app.models.midas_depth import MiDaSDepthEstimator
 from app.models.paddle_ocr import PaddleOCRDetector
 from app.services.preprocessing import ImagePreprocessor
@@ -21,76 +21,34 @@ from app.schemas.detection import (
     TextDetectionResponse, DepthEstimationResponse, NavigationGuidanceResponse,
     NavigationGuidanceResult, DetectionResult, BoundingBox
 )
-class FaceRecognizer:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def recognize(self, *args, **kwargs):
-        return []
+# Native face recognition module models are now used
 
 # Set up logging
 setup_logging()
 logger = get_logger(__name__)
 
 # Initialize models (will be loaded on first request)
-yolo_detector = None
-face_detector = None
-sface_detector = None
-face_recognizer = None
+# Initialize models globally
+yolo_detector = YOLODetector()
+face_detector = FaceDetector()
+face_recognizer = FaceRecognizer()
+sface_detector = None # Legacy, replaced by face_recognizer
 navigation_service = None
 
 router = APIRouter()
 
 def get_yolo_detector():
-    """Get YOLO detector instance, loading it if necessary."""
-    global yolo_detector
-    if yolo_detector is None:
-        try:
-            yolo_detector = YOLODetector()
-            logger.info("YOLO detector initialized")
-        except Exception as e:
-            logger.error(f"Failed to initialize YOLO detector: {str(e)}")
-            raise HTTPException(status_code=500, detail="YOLO model not available")
+    """Get YOLO detector instance."""
     return yolo_detector
 
 def get_face_detector():
-    """Get face detector instance, loading it if necessary."""
-    global face_detector
-    if face_detector is None:
-        try:
-            face_detector = FaceDetector()
-            logger.info("Face detector initialized")
-        except Exception as e:
-            logger.warning(f"Face detector initialization failed: {str(e)}")
-            logger.warning("Face detection will be skipped")
-            face_detector = False  # Mark as unavailable
-    
-    if face_detector is False:
-        raise HTTPException(status_code=501, detail="Face detection model not available - disabled for this session")
+    """Get face detector instance."""
     return face_detector
 
-def get_sface_detector():
-    """Get SFace detector instance, loading it if necessary."""
-    global sface_detector
-    if sface_detector is None:
-        try:
-            sface_detector = SFaceDetector()
-            logger.info("SFace detector initialized")
-        except Exception as e:
-            logger.error(f"Failed to initialize SFace detector: {str(e)}")
-            raise HTTPException(status_code=500, detail="SFace model not available")
-    return sface_detector
+# Legacy SFaceDetector removed - use face_recognizer instead
 
 def get_face_recognizer():
-    """Get face recognizer instance, loading it if necessary."""
-    global face_recognizer
-    if face_recognizer is None:
-        try:
-            face_recognizer = FaceRecognizer()
-            logger.info("Face recognizer initialized")
-        except Exception as e:
-            logger.error(f"Failed to initialize face recognizer: {str(e)}")
-            raise HTTPException(status_code=500, detail="Face recognition model not available")
+    """Get face recognizer instance."""
     return face_recognizer
 
 def get_navigation_service():
@@ -254,16 +212,22 @@ async def detect_faces(
     start_time = time.time()
     
     try:
-        # Validate and load image
-        image_bytes = await file.read()
-        image = ImagePreprocessor.validate_and_load_image(image_bytes, file.content_type)
+        # Read uploaded file bytes
+        contents = await file.read()
         
-        # Preprocess image for face detection
-        processed_image = ImagePreprocessor.preprocess_for_face(image)
+        # Convert bytes to numpy array
+        image_np = np.frombuffer(contents, np.uint8)
+        
+        # Decode image using OpenCV (BGR)
+        image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
+        
+        # Validate decoding
+        if image is None:
+            raise HTTPException(status_code=400, detail="Failed to decode uploaded image")
         
         # Get detector and run inference
-        detector = get_face_detector()
-        face_detections = detector.detect_faces(processed_image)
+        face_detections = face_detector.detect_faces(image)
+        h, w = image.shape[:2]
         
         # Process face detections
         faces = []
@@ -287,15 +251,35 @@ async def detect_faces(
             # Perform face recognition if requested and confidence is high enough
             if recognize_faces and confidence >= confidence_threshold:
                 try:
-                    recognizer = get_face_recognizer()
                     
-                    # Extract face region for recognition
-                    # This is a simplified version - in practice you'd extract the face region
-                    embedding = recognizer.extract_embedding(processed_image)
-                    person_id = recognizer.recognize_face(processed_image)
+                    # 1) Convert normalized bbox -> pixel coordinates
+                    x1 = int(bbox[0] * w)
+                    y1 = int(bbox[1] * h)
+                    x2 = int(bbox[2] * w)
+                    y2 = int(bbox[3] * h)
                     
-                    face_result['embedding'] = embedding.tolist() if embedding is not None else None
-                    face_result['person_id'] = person_id
+                    # 2) Crop face from original image
+                    face_crop = image[y1:y2, x1:x2]
+                    
+                    if face_crop.size > 0:
+                        # 3) Run recognition with alignment for highest precision
+                        person_id = face_recognizer.recognize_face(
+                            face_crop,
+                            frame=image,
+                            coarse_box=detection.get('raw_box'),
+                            coarse_kps=detection.get('kps')
+                        )
+                        
+                        # Get embedding for response (also uses alignment internally)
+                        embedding = face_recognizer.get_embedding(
+                            face_crop, 
+                            frame=image, 
+                            coarse_box=detection.get('raw_box'), 
+                            coarse_kps=detection.get('kps')
+                        )
+                        
+                        face_result['embedding'] = embedding.tolist() if embedding is not None else None
+                        face_result['person_id'] = person_id
                     
                 except Exception as e:
                     logger.warning(f"Face recognition failed: {str(e)}")
@@ -353,22 +337,29 @@ async def detect_all(
     start_time = time.time()
     
     try:
-        # Validate and load image
-        image_bytes = await file.read()
-        image = ImagePreprocessor.validate_and_load_image(image_bytes, file.content_type)
+        # Read uploaded file bytes
+        contents = await file.read()
+        
+        # Convert bytes to numpy array
+        image_np = np.frombuffer(contents, np.uint8)
+        
+        # Decode image using OpenCV (BGR)
+        image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
+        
+        # Validate decoding
+        if image is None:
+            raise HTTPException(status_code=400, detail="Failed to decode uploaded image")
         
         # Perform object detection
-        object_processed = ImagePreprocessor.preprocess_for_yolo(image)
         object_detector = get_yolo_detector()
-        object_detections = object_detector.detect(object_processed)
+        object_detections = object_detector.detect(image)
         filtered_objects = DetectionPostprocessor.filter_detections_by_confidence(
             object_detections, object_confidence
         )
         
         # Perform face detection
-        face_processed = ImagePreprocessor.preprocess_for_face(image)
-        face_detector = get_face_detector()
-        face_detections = face_detector.detect_faces(face_processed)
+        face_detections = face_detector.detect_faces(image)
+        h, w = image.shape[:2]
         
         # Process faces with optional recognition
         faces = []
@@ -390,12 +381,31 @@ async def detect_all(
             
             if recognize_faces and confidence >= face_confidence:
                 try:
-                    recognizer = get_face_recognizer()
-                    embedding = recognizer.extract_embedding(face_processed)
-                    person_id = recognizer.recognize_face(face_processed)
                     
-                    face_result['embedding'] = embedding.tolist() if embedding is not None else None
-                    face_result['person_id'] = person_id
+                    # Crop face
+                    x1, y1 = int(bbox[0] * w), int(bbox[1] * h)
+                    x2, y2 = int(bbox[2] * w), int(bbox[3] * h)
+                    face_crop = image[y1:y2, x1:x2]
+                    
+                    if face_crop.size > 0:
+                        # Aligned recognition
+                        person_id = face_recognizer.recognize_face(
+                            face_crop,
+                            frame=image,
+                            coarse_box=detection.get('raw_box'),
+                            coarse_kps=detection.get('kps')
+                        )
+                        
+                        # Aligned embedding
+                        embedding = face_recognizer.get_embedding(
+                            face_crop,
+                            frame=image,
+                            coarse_box=detection.get('raw_box'),
+                            coarse_kps=detection.get('kps')
+                        )
+                        
+                        face_result['embedding'] = embedding.tolist() if embedding is not None else None
+                        face_result['person_id'] = person_id
                     
                 except Exception as e:
                     logger.warning(f"Face recognition failed: {str(e)}")

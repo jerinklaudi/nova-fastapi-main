@@ -19,13 +19,19 @@ class DetectionOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Draw faces with purple bounding boxes
+    // Draw faces: Green if recognized, Red if unknown
     for (final face in faces) {
+      final bool isRecognized = face.personId != null && 
+                                face.personId!.isNotEmpty && 
+                                face.personId != 'unknown';
+      final Color boxColor = isRecognized ? Colors.green : Colors.red;
+      final String label = isRecognized ? face.personId! : 'Unknown';
+
       _drawBoundingBox(
         canvas,
         face.bbox,
-        const Color(0xFFE040FB), // Purple/Magenta
-        'Face (${(face.confidence * 100).toStringAsFixed(0)}%)',
+        boxColor,
+        '$label (${(face.confidence * 100).toStringAsFixed(0)}%)',
       );
     }
 

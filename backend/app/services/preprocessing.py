@@ -19,16 +19,22 @@ class ImagePreprocessor:
     def validate_and_load_image(image_bytes: bytes, content_type: str, max_size: Optional[int] = None) -> Image.Image:
         """Validate and load image from bytes."""
         try:
+            normalized_content_type = (content_type or "").lower()
             logger.info(f"Validating image: content_type={content_type}, size={len(image_bytes)} bytes")
             
             # Validate content type
             logger.debug(f"Checking content type against allowed types: {settings.ALLOWED_IMAGE_TYPES}")
-            if not validate_image_content_type(content_type):
-                logger.error(f"Invalid content type: {content_type}")
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Unsupported image type. Supported types: {settings.ALLOWED_IMAGE_TYPES}"
-                )
+            if not validate_image_content_type(normalized_content_type):
+                if normalized_content_type == "application/octet-stream":
+                    logger.warning(
+                        "Received generic octet-stream upload; attempting image decode based on file bytes"
+                    )
+                else:
+                    logger.error(f"Invalid content type: {content_type}")
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Unsupported image type. Supported types: {settings.ALLOWED_IMAGE_TYPES}"
+                    )
             logger.debug("✓ Content type validated")
             
             # Validate image size

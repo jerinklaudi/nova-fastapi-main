@@ -40,7 +40,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _inferenceInProgress = false; // Throttle lock for concurrent inferences
   ModeInferenceResult? _lastResult;
   NovaMode? _lastInferenceMode; // Track which mode last performed inference
-  Map<String, dynamic>? _rawResponseJson; // Store raw backend response for debugging
   String _statusMessage = 'Ready';
   bool _backendConnected = false;
   int _frameCount = 0; // For frame-skip throttling in image stream
@@ -340,7 +339,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _isNavigationActive = true;
       // Clear stale detection data
       _lastResult = null;
-      _rawResponseJson = null;
     });
     print('[NOVA DEBUG] Mode switched via activation: ${mode.label}');
     _announceMode();
@@ -350,15 +348,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _manageImageStream() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
 
-    if (_currentMode == NovaMode.navigation && _settings.autoDetection && _isNavigationActive && !EmergencyService.instance.isActive) {
+    final bool shouldStream =
+        (_currentMode == NovaMode.navigation || _currentMode == NovaMode.recognition) &&
+        _settings.autoDetection &&
+        _isNavigationActive &&
+        !EmergencyService.instance.isActive;
+
+    if (shouldStream) {
       if (!_controller!.value.isStreamingImages) {
         // Delay stream start by 300ms to avoid UI freeze during mode switch
         print('[NOVA DEBUG] Delaying stream start for 300ms...');
         await Future.delayed(const Duration(milliseconds: 300));
-        if (mounted && _controller!.value.isInitialized && !_controller!.value.isStreamingImages && _currentMode == NovaMode.navigation) {
+        if (mounted && _controller!.value.isInitialized && !_controller!.value.isStreamingImages &&
+            (_currentMode == NovaMode.navigation || _currentMode == NovaMode.recognition) &&
+            _isNavigationActive && !EmergencyService.instance.isActive) {
           try {
             await _controller!.startImageStream(_onFrameAvailable);
-            print('[NOVA DEBUG] ✓ Image stream started for Navigation Mode');
+            print('[NOVA DEBUG] ✓ Image stream started for ${_currentMode.label} Mode');
           } catch (e) {
             print('[NOVA DEBUG] ❌ Failed to start image stream: $e');
           }
@@ -368,7 +374,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (_controller!.value.isStreamingImages) {
         try {
           await _controller!.stopImageStream();
-          print('[NOVA DEBUG] ✓ Image stream stopped for non-navigation mode');
+          print('[NOVA DEBUG] ✓ Image stream stopped (mode: ${_currentMode.label})');
         } catch (e) {
              print('[NOVA DEBUG] ❌ Failed to stop image stream: $e');
         }
@@ -403,7 +409,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       // Clear stale detection data when mode changes
       if (_lastInferenceMode != _currentMode) {
         _lastResult = null;
-        _rawResponseJson = null;
         print('[NOVA DEBUG] Cleared stale detection data from previous mode');
       }
     });
