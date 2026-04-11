@@ -178,6 +178,7 @@ class MiDaSDepthEstimator:
             
             # Create result
             result = DepthEstimationResult(
+                depth_map=depth_normalized.tolist(),
                 min_depth=float(near),
                 max_depth=float(far),
                 mean_depth=float(depth_map.mean()),

@@ -234,9 +234,21 @@ class ApiService {
 
   /// Get navigation guidance (combined detection + depth)
   static Future<Map<String, dynamic>> getNavigationGuidance(
-    File imageFile,
-  ) async {
-    final uri = Uri.parse('$baseUrl/detect/navigation');
+    File imageFile, {
+    double objectConfidenceThreshold = 0.5,
+    double textConfidenceThreshold = 0.5,
+    bool enableTextDetection = true,
+    bool enableDepthEstimation = true,
+    bool generateAudio = false,
+  }) async {
+    final uri =
+        Uri.parse('$baseUrl/detect/navigation').replace(queryParameters: {
+      'object_confidence': objectConfidenceThreshold.toString(),
+      'text_confidence': textConfidenceThreshold.toString(),
+      'return_audio': generateAudio.toString(),
+      'enable_text_detection': enableTextDetection.toString(),
+      'enable_depth_estimation': enableDepthEstimation.toString(),
+    });
 
     try {
       // Determine content type from file extension

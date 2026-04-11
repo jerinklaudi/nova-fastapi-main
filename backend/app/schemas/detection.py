@@ -7,6 +7,7 @@ class DetectionResult(BaseModel):
     label: str = Field(..., description="Detected object class")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Detection confidence")
     bbox: 'BoundingBox' = Field(..., description="Bounding box coordinates")
+    distance: Optional[float] = Field(None, description="Estimated distance in meters")
 
 class BoundingBox(BaseModel):
     """Bounding box coordinates."""
@@ -30,6 +31,7 @@ class TextDetectionResult(BaseModel):
 
 class DepthEstimationResult(BaseModel):
     """Depth estimation result."""
+    depth_map: Optional[List[List[float]]] = Field(None, description="Normalized depth map")
     min_depth: float = Field(..., description="Minimum depth value")
     max_depth: float = Field(..., description="Maximum depth value")
     mean_depth: float = Field(..., description="Mean depth value")

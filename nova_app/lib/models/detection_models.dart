@@ -19,12 +19,13 @@ class BoundingBox {
       final top = (json['top'] as num?)?.toDouble() ?? 0.0;
       final right = (json['right'] as num?)?.toDouble() ?? 0.0;
       final bottom = (json['bottom'] as num?)?.toDouble() ?? 0.0;
-      
+
       // Validate bounding box values
       if (left < 0 || top < 0 || right < 0 || bottom < 0) {
-        print('[NOVA DEBUG] ⚠️  Invalid bbox values: left=$left, top=$top, right=$right, bottom=$bottom');
+        print(
+            '[NOVA DEBUG] ⚠️  Invalid bbox values: left=$left, top=$top, right=$right, bottom=$bottom');
       }
-      
+
       return BoundingBox(
         left: left,
         top: top,
@@ -42,27 +43,31 @@ class Detection {
   final String label;
   final double confidence;
   final BoundingBox bbox;
+  final double? distance;
 
   Detection({
     required this.label,
     required this.confidence,
     required this.bbox,
+    this.distance,
   });
 
   factory Detection.fromJson(Map<String, dynamic> json) {
     try {
       final label = json['label'] as String? ?? 'unknown';
       final confidence = (json['confidence'] as num?)?.toDouble() ?? 0.0;
-      
+
       // Validate confidence value
       if (confidence < 0 || confidence > 1) {
-        print('[NOVA DEBUG] ⚠️  Invalid confidence value: $confidence (should be 0-1)');
+        print(
+            '[NOVA DEBUG] ⚠️  Invalid confidence value: $confidence (should be 0-1)');
       }
-      
+
       return Detection(
         label: label,
         confidence: confidence.clamp(0.0, 1.0),
         bbox: BoundingBox.fromJson(json['bbox'] as Map<String, dynamic>? ?? {}),
+        distance: (json['distance'] as num?)?.toDouble(),
       );
     } catch (e) {
       print('[NOVA DEBUG] ❌ Error parsing Detection: $e, json=$json');
@@ -70,6 +75,7 @@ class Detection {
         label: 'error',
         confidence: 0.0,
         bbox: BoundingBox(left: 0, top: 0, right: 0, bottom: 0),
+        distance: null,
       );
     }
   }
@@ -88,7 +94,7 @@ class ObjectDetectionResponse {
     try {
       final detectionsList = <Detection>[];
       final rawDetections = json['detections'] as List<dynamic>? ?? [];
-      
+
       for (final d in rawDetections) {
         try {
           detectionsList.add(Detection.fromJson(d as Map<String, dynamic>));
@@ -98,7 +104,8 @@ class ObjectDetectionResponse {
       }
 
       if (detectionsList.isEmpty && rawDetections.isNotEmpty) {
-        print('[NOVA DEBUG] ⚠️  Response had ${rawDetections.length} detections but all failed to parse');
+        print(
+            '[NOVA DEBUG] ⚠️  Response had ${rawDetections.length} detections but all failed to parse');
       }
 
       return ObjectDetectionResponse(
@@ -129,12 +136,12 @@ class Face {
   factory Face.fromJson(Map<String, dynamic> json) {
     try {
       final confidence = (json['confidence'] as num?)?.toDouble() ?? 0.0;
-      
+
       // Validate confidence
       if (confidence < 0 || confidence > 1) {
         print('[NOVA DEBUG] ⚠️  Invalid face confidence: $confidence');
       }
-      
+
       final embeddingList = <double>[];
       final rawEmbedding = json['embedding'] as List<dynamic>?;
       if (rawEmbedding != null) {
@@ -176,7 +183,7 @@ class FaceDetectionResponse {
     try {
       final facesList = <Face>[];
       final rawFaces = json['faces'] as List<dynamic>? ?? [];
-      
+
       for (final f in rawFaces) {
         try {
           facesList.add(Face.fromJson(f as Map<String, dynamic>));
@@ -186,7 +193,8 @@ class FaceDetectionResponse {
       }
 
       if (facesList.isEmpty && rawFaces.isNotEmpty) {
-        print('[NOVA DEBUG] ⚠️  Response had ${rawFaces.length} faces but all failed to parse');
+        print(
+            '[NOVA DEBUG] ⚠️  Response had ${rawFaces.length} faces but all failed to parse');
       }
 
       return FaceDetectionResponse(
@@ -216,12 +224,12 @@ class TextRegion {
     try {
       final text = json['text'] as String? ?? '';
       final confidence = (json['confidence'] as num?)?.toDouble() ?? 0.0;
-      
+
       // Validate confidence
       if (confidence < 0 || confidence > 1) {
         print('[NOVA DEBUG] ⚠️  Invalid text confidence: $confidence');
       }
-      
+
       return TextRegion(
         text: text,
         confidence: confidence.clamp(0.0, 1.0),
@@ -251,17 +259,19 @@ class TextDetectionResponse {
     try {
       final regionsList = <TextRegion>[];
       final rawRegions = json['text_regions'] as List<dynamic>? ?? [];
-      
+
       for (final r in rawRegions) {
         try {
           regionsList.add(TextRegion.fromJson(r as Map<String, dynamic>));
         } catch (e) {
-          print('[NOVA DEBUG] ⚠️  Skipped malformed text region: $r, error: $e');
+          print(
+              '[NOVA DEBUG] ⚠️  Skipped malformed text region: $r, error: $e');
         }
       }
 
       if (regionsList.isEmpty && rawRegions.isNotEmpty) {
-        print('[NOVA DEBUG] ⚠️  Response had ${rawRegions.length} text regions but all failed to parse');
+        print(
+            '[NOVA DEBUG] ⚠️  Response had ${rawRegions.length} text regions but all failed to parse');
       }
 
       return TextDetectionResponse(
@@ -319,9 +329,27 @@ class NavigationGuidanceResponse {
   });
 
   factory NavigationGuidanceResponse.fromJson(Map<String, dynamic> json) {
+    final dynamic guidanceNode = json['guidance'];
+    Map<String, dynamic> guidanceJson;
+
+    // Support both wrapped payloads ({ guidance: {...}, inference_time_ms: ... })
+    // and flat payloads ({ obstacles: [...], guidance: '...', ... }).
+    if (guidanceNode is Map<String, dynamic>) {
+      guidanceJson = guidanceNode;
+    } else if (guidanceNode is Map) {
+      guidanceJson = Map<String, dynamic>.from(guidanceNode);
+    } else {
+      guidanceJson = json;
+    }
+
+    var inference = (json['inference_time_ms'] as num? ?? 0.0).toDouble();
+    if (inference == 0.0) {
+      inference = (guidanceJson['inference_time_ms'] as num? ?? 0.0).toDouble();
+    }
+
     return NavigationGuidanceResponse(
-      guidance: NavigationGuidance.fromJson(json['guidance'] as Map<String, dynamic>),
-      inferenceTimeMs: (json['inference_time_ms'] as num? ?? 0.0).toDouble(),
+      guidance: NavigationGuidance.fromJson(guidanceJson),
+      inferenceTimeMs: inference,
     );
   }
 }

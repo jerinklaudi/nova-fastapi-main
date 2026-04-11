@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException, Query, Form
+from fastapi import APIRouter, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from typing import List, Optional
 import time
@@ -14,54 +14,61 @@ from app.models.paddle_ocr import PaddleOCRDetector
 from app.services.preprocessing import ImagePreprocessor
 from app.services.postprocessing import DetectionPostprocessor
 
+from app.services.audio_feedback import AudioFeedbackService
 from app.services.navigation_guidance import NavigationGuidanceService
-import cv2
 from app.schemas.detection import (
     ObjectDetectionResponse, FaceDetectionResponse, 
-    TextDetectionResponse, DepthEstimationResponse, NavigationGuidanceResponse,
-    NavigationGuidanceResult, DetectionResult, BoundingBox
+    TextDetectionResponse, DepthEstimationResponse, NavigationGuidanceResponse
 )
-# Native face recognition module models are now used
+
+_RECOGNITION_THRESHOLD = 0.60  # minimum cosine similarity to call it a match
 
 # Set up logging
 setup_logging()
 logger = get_logger(__name__)
 
 # Initialize models (will be loaded on first request)
-# Initialize models globally
-yolo_detector = YOLODetector()
-face_detector = FaceDetector()
-face_recognizer = FaceRecognizer()
-sface_detector = None # Legacy, replaced by face_recognizer
-navigation_service = None
+yolo_detector = None
+face_detector = None
+face_recognizer = None
 
 router = APIRouter()
 
 def get_yolo_detector():
-    """Get YOLO detector instance."""
+    """Get YOLO detector instance, loading it if necessary."""
+    global yolo_detector
+    if yolo_detector is None:
+        try:
+            yolo_detector = YOLODetector()
+            logger.info("YOLO detector initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize YOLO detector: {str(e)}")
+            raise HTTPException(status_code=500, detail="YOLO model not available")
     return yolo_detector
 
 def get_face_detector():
-    """Get face detector instance."""
+    """Get face detector instance, loading it if necessary."""
+    global face_detector
+    if face_detector is None:
+        try:
+            face_detector = FaceDetector()
+            logger.info("Face detector initialized (YOLOv8n-face ONNX)")
+        except Exception as e:
+            logger.error(f"Face detector initialization failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Face detection model not available: {e}")
     return face_detector
 
-# Legacy SFaceDetector removed - use face_recognizer instead
-
 def get_face_recognizer():
-    """Get face recognizer instance."""
-    return face_recognizer
-
-def get_navigation_service():
-    """Get NavigationGuidanceService instance (loaded once, reused per request)."""
-    global navigation_service
-    if navigation_service is None:
+    """Get face recognizer instance, loading it if necessary."""
+    global face_recognizer
+    if face_recognizer is None:
         try:
-            navigation_service = NavigationGuidanceService()
-            logger.info("NavigationGuidanceService initialized")
+            face_recognizer = FaceRecognizer()
+            logger.info("Face recognizer initialized")
         except Exception as e:
-            logger.error(f"Failed to initialize NavigationGuidanceService: {str(e)}")
-            raise HTTPException(status_code=500, detail="Navigation models not available")
-    return navigation_service
+            logger.error(f"Failed to initialize face recognizer: {str(e)}")
+            raise HTTPException(status_code=500, detail="Face recognition model not available")
+    return face_recognizer
 
 @router.post("/objects", response_model=ObjectDetectionResponse)
 async def detect_objects(
@@ -87,12 +94,13 @@ async def detect_objects(
         image_bytes = await file.read()
         image = ImagePreprocessor.validate_and_load_image(image_bytes, file.content_type)
         
-        # Preprocess image for YOLO
-        processed_image = ImagePreprocessor.preprocess_for_yolo(image)
-        
         # Get detector and run inference
         detector = get_yolo_detector()
-        detections = detector.detect(processed_image)
+        image_np = np.array(image)
+        if len(image_np.shape) == 3 and image_np.shape[2] == 3:
+            import cv2
+            image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        detections = detector.detect(image_np)
         
         # Filter by confidence threshold
         filtered_detections = DetectionPostprocessor.filter_detections_by_confidence(
@@ -212,106 +220,75 @@ async def detect_faces(
     start_time = time.time()
     
     try:
-        # Read uploaded file bytes
-        contents = await file.read()
-        
-        # Convert bytes to numpy array
-        image_np = np.frombuffer(contents, np.uint8)
-        
-        # Decode image using OpenCV (BGR)
-        image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
-        
-        # Validate decoding
-        if image is None:
-            raise HTTPException(status_code=400, detail="Failed to decode uploaded image")
-        
-        # Get detector and run inference
-        face_detections = face_detector.detect_faces(image)
-        h, w = image.shape[:2]
-        
-        # Process face detections
+        import cv2
+        import numpy as np
+
+        # Decode image bytes → BGR numpy array (needed by FaceDetector)
+        image_bytes = await file.read()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise HTTPException(status_code=422, detail="Could not decode image")
+
+        h, w = frame.shape[:2]
+
+        # Run YOLOv8n-face detector: returns (boxes, kps_list, scores) in pixel coords
+        detector = get_face_detector()
+        boxes, kps_list, scores = detector.detect(frame)
+
+        # Lazily load recognizer only if needed
+        recognizer = get_face_recognizer() if recognize_faces else None
+
         faces = []
-        for detection in face_detections:
-            bbox = detection['bbox']
-            confidence = detection['confidence']
-            
-            # Create face detection result
+        for box, kps, score in zip(boxes, kps_list, scores):
+            if float(score) < confidence_threshold:
+                continue
+
+            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+
             face_result = {
-                'confidence': confidence,
+                'confidence': float(score),
                 'bbox': {
-                    'left': bbox[0],
-                    'top': bbox[1],
-                    'right': bbox[2],
-                    'bottom': bbox[3]
+                    'left':   max(0.0, float(x1) / w),
+                    'top':    max(0.0, float(y1) / h),
+                    'right':  min(1.0, float(x2) / w),
+                    'bottom': min(1.0, float(y2) / h),
                 },
                 'embedding': None,
-                'person_id': None
+                'person_id': None,
             }
-            
-            # Perform face recognition if requested and confidence is high enough
-            if recognize_faces and confidence >= confidence_threshold:
+
+            if recognize_faces and recognizer is not None:
                 try:
-                    
-                    # 1) Convert normalized bbox -> pixel coordinates
-                    x1 = int(bbox[0] * w)
-                    y1 = int(bbox[1] * h)
-                    x2 = int(bbox[2] * w)
-                    y2 = int(bbox[3] * h)
-                    
-                    # 2) Crop face from original image
-                    face_crop = image[y1:y2, x1:x2]
-                    
-                    if face_crop.size > 0:
-                        # 3) Run recognition with alignment for highest precision
-                        person_id = face_recognizer.recognize_face(
-                            face_crop,
-                            frame=image,
-                            coarse_box=detection.get('raw_box'),
-                            coarse_kps=detection.get('kps')
-                        )
-                        
-                        # Get embedding for response (also uses alignment internally)
-                        embedding = face_recognizer.get_embedding(
-                            face_crop, 
-                            frame=image, 
-                            coarse_box=detection.get('raw_box'), 
-                            coarse_kps=detection.get('kps')
-                        )
-                        
-                        face_result['embedding'] = embedding.tolist() if embedding is not None else None
-                        face_result['person_id'] = person_id
-                    
+                    face_crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+                    kps_list_py = kps.tolist() if hasattr(kps, 'tolist') else list(kps)
+                    person_id = recognizer.recognize_face(
+                        face_crop,
+                        threshold=_RECOGNITION_THRESHOLD,
+                        frame=frame,
+                        coarse_box=[x1, y1, x2, y2],
+                        coarse_kps=kps_list_py,
+                    )
+                    face_result['person_id'] = person_id
                 except Exception as e:
-                    logger.warning(f"Face recognition failed: {str(e)}")
-            
+                    logger.warning(f"Face recognition failed for one face: {e}")
+
             faces.append(face_result)
-        
-        # Format response
+
         inference_time = time.time() - start_time
         response = FaceDetectionResponse(
             faces=faces,
             inference_time_ms=round(inference_time * 1000, 2)
         )
-        
-        # Generate audio feedback if requested
-        if return_audio:
-            try:
-                description = AudioFeedbackService.generate_face_description(faces)
-                audio_path = AudioFeedbackService.text_to_speech(description)
-                if audio_path:
-                    response.audio_description = description
-                    response.audio_file = audio_path
-            except Exception as e:
-                logger.warning(f"Audio feedback generation failed: {str(e)}")
-        
+
         logger.info(f"Face detection completed: {len(faces)} faces in {inference_time:.3f}s")
         return response
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Face detection failed: {str(e)}")
-        raise HTTPException(status_code=500, detail="Face detection failed")
+        raise HTTPException(status_code=500, detail=f"Face detection failed: {e}")
 
 @router.post("/all")
 async def detect_all(
@@ -337,79 +314,61 @@ async def detect_all(
     start_time = time.time()
     
     try:
-        # Read uploaded file bytes
-        contents = await file.read()
-        
-        # Convert bytes to numpy array
-        image_np = np.frombuffer(contents, np.uint8)
-        
-        # Decode image using OpenCV (BGR)
-        image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
-        
-        # Validate decoding
-        if image is None:
-            raise HTTPException(status_code=400, detail="Failed to decode uploaded image")
-        
-        # Perform object detection
+        import cv2 as _cv2
+        import numpy as _np
+
+        image_bytes = await file.read()
+
+        # Object detection path
+        image = ImagePreprocessor.validate_and_load_image(image_bytes, file.content_type)
+        object_processed = ImagePreprocessor.preprocess_for_yolo(image)
         object_detector = get_yolo_detector()
-        object_detections = object_detector.detect(image)
+        object_detections = object_detector.detect(object_processed)
         filtered_objects = DetectionPostprocessor.filter_detections_by_confidence(
             object_detections, object_confidence
         )
-        
-        # Perform face detection
-        face_detections = face_detector.detect_faces(image)
-        h, w = image.shape[:2]
-        
-        # Process faces with optional recognition
+
+        # Face detection path — decode BGR frame directly
+        nparr = _np.frombuffer(image_bytes, _np.uint8)
+        frame = _cv2.imdecode(nparr, _cv2.IMREAD_COLOR)
+        if frame is None:
+            raise ValueError("Could not decode image for face detection")
+
+        face_det = get_face_detector()
+        boxes, kps_list_all, scores_all = face_det.detect(frame)
+        h_f, w_f = frame.shape[:2]
+
+        recognizer = get_face_recognizer() if recognize_faces else None
+
         faces = []
-        for detection in face_detections:
-            bbox = detection['bbox']
-            confidence = detection['confidence']
-            
+        for box, kps, score in zip(boxes, kps_list_all, scores_all):
+            if float(score) < face_confidence:
+                continue
+            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
             face_result = {
-                'confidence': confidence,
+                'confidence': float(score),
                 'bbox': {
-                    'left': bbox[0],
-                    'top': bbox[1],
-                    'right': bbox[2],
-                    'bottom': bbox[3]
+                    'left':   max(0.0, float(x1) / w_f),
+                    'top':    max(0.0, float(y1) / h_f),
+                    'right':  min(1.0, float(x2) / w_f),
+                    'bottom': min(1.0, float(y2) / h_f),
                 },
                 'embedding': None,
-                'person_id': None
+                'person_id': None,
             }
-            
-            if recognize_faces and confidence >= face_confidence:
+            if recognize_faces and recognizer is not None:
                 try:
-                    
-                    # Crop face
-                    x1, y1 = int(bbox[0] * w), int(bbox[1] * h)
-                    x2, y2 = int(bbox[2] * w), int(bbox[3] * h)
-                    face_crop = image[y1:y2, x1:x2]
-                    
-                    if face_crop.size > 0:
-                        # Aligned recognition
-                        person_id = face_recognizer.recognize_face(
-                            face_crop,
-                            frame=image,
-                            coarse_box=detection.get('raw_box'),
-                            coarse_kps=detection.get('kps')
-                        )
-                        
-                        # Aligned embedding
-                        embedding = face_recognizer.get_embedding(
-                            face_crop,
-                            frame=image,
-                            coarse_box=detection.get('raw_box'),
-                            coarse_kps=detection.get('kps')
-                        )
-                        
-                        face_result['embedding'] = embedding.tolist() if embedding is not None else None
-                        face_result['person_id'] = person_id
-                    
+                    face_crop = frame[max(0, y1):min(h_f, y2), max(0, x1):min(w_f, x2)]
+                    person_id = recognizer.recognize_face(
+                        face_crop,
+                        threshold=_RECOGNITION_THRESHOLD,
+                        frame=frame,
+                        coarse_box=[x1, y1, x2, y2],
+                        coarse_kps=kps.tolist() if hasattr(kps, 'tolist') else list(kps),
+                    )
+                    face_result['person_id'] = person_id
                 except Exception as e:
-                    logger.warning(f"Face recognition failed: {str(e)}")
-            
+                    logger.warning(f"Face recognition in /all failed: {e}")
             faces.append(face_result)
         
         # Generate combined results
@@ -555,13 +514,7 @@ async def detect_text(
         
         # Initialize OCR detector
         try:
-            from app.models.paddle_ocr import OCR_AVAILABLE
-            if not OCR_AVAILABLE:
-                raise HTTPException(status_code=501, detail="OCR service not installed")
-            
             ocr_detector = PaddleOCRDetector()
-        except HTTPException:
-            raise
         except Exception as e:
             logger.error(f"Failed to initialize PaddleOCR detector: {str(e)}")
             raise HTTPException(status_code=500, detail="OCR model not available")
@@ -604,7 +557,7 @@ async def get_navigation_guidance(
     file: UploadFile = File(..., description="Image file to analyze"),
     object_confidence: float = Query(default=0.5, ge=0.0, le=1.0, description="Object detection confidence threshold"),
     text_confidence: float = Query(default=0.3, ge=0.0, le=1.0, description="Text detection confidence threshold"),
-    return_audio: bool = Query(default=False, description="Generate audio feedback")
+    return_audio: bool = Query(default=True, description="Generate audio feedback")
 ):
     """
     Generate navigation guidance using fusion of YOLO + MiDaS + OCR.
@@ -658,7 +611,7 @@ async def get_navigation_guidance(
         # Initialize navigation guidance service
         logger.info("Stage 3/5: Initializing navigation guidance service...")
         try:
-            nav_service = get_navigation_service()
+            guidance_service = NavigationGuidanceService()
             logger.info("✓ Navigation service initialized")
         except Exception as e:
             logger.error(f"✗ Service initialization failed: {str(e)}")
@@ -669,7 +622,12 @@ async def get_navigation_guidance(
         # Run navigation guidance
         logger.info("Stage 4/5: Running navigation guidance pipeline...")
         try:
-            guidance_result = nav_service.get_navigation_guidance(image_bytes, file.content_type)
+            guidance_result = guidance_service.get_navigation_guidance(
+                image_bytes,
+                file.content_type,
+                object_confidence=object_confidence,
+                text_confidence=text_confidence,
+            )
             logger.info(f"✓ Navigation guidance completed")
             logger.info(f"  - Obstacles detected: {len(guidance_result.obstacles)}")
             logger.info(f"  - Text signs detected: {len(guidance_result.text_signs)}")
@@ -704,14 +662,8 @@ async def get_navigation_guidance(
                 logger.warning(f"⚠ Audio feedback generation failed: {str(e)}")
         
         logger.info(f"✓ NAVIGATION GUIDANCE COMPLETED: {inference_time:.3f}s")
-        logger.info("NAVIGATION RESPONSE SENT SUCCESSFULLY")
         logger.info("=" * 60)
-        
-        # Inject dynamic fields before sending JSON
-        out_data = response.dict()
-        out_data["ready"] = True
-        out_data["debug_depth"] = getattr(guidance_result, "debug_depth", "N/A")
-        return JSONResponse(content=out_data)
+        return response
         
     except HTTPException:
         raise

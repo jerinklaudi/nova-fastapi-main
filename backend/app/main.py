@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import health, inference
 from app.api import face_registration
 from app.core.config import settings
-from app.api.inference import get_navigation_service
+from app.services.navigation_guidance import NavigationGuidanceService
 
 app = FastAPI(
     title="NOVA API",
@@ -35,7 +35,7 @@ async def startup_event():
             print(f"[NOVA API] ⚠️ WARNING: {name} model NOT found at {path}")
     
     try:
-        service = get_navigation_service()
+        service = NavigationGuidanceService()
         service._warmup_models()
         print("[NOVA API] Navigation models loaded and warmed up successfully.")
     except Exception as e:

@@ -43,9 +43,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String _statusMessage = 'Ready';
   bool _backendConnected = false;
   int _frameCount = 0; // For frame-skip throttling in image stream
-  bool _isNavigationActive = false; // Flag to prevent eager TTS/stream on startup
-  Uint8List? _heatmapImage;          // Latest heatmap frame from backend (decoded JPEG)
-  String _navCommand = 'PATH_CLEAR'; // Latest canonical command for banner color
+  DateTime _lastFrameProcessedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _isNavigationActive =
+      false; // Flag to prevent eager TTS/stream on startup
+  Uint8List? _heatmapImage; // Latest heatmap frame from backend (decoded JPEG)
+  String _navCommand =
+      'PATH_CLEAR'; // Latest canonical command for banner color
 
   @override
   void initState() {
@@ -55,24 +58,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     // Register emergency ↔ navigation callbacks
     EmergencyService.instance.onNavigationPause = _pauseNavigationForEmergency;
-    EmergencyService.instance.onNavigationResume = _resumeNavigationAfterEmergency;
+    EmergencyService.instance.onNavigationResume =
+        _resumeNavigationAfterEmergency;
 
     // Listen for Activations (Native or Voice or Shake)
     ActivationService.instance.onTrigger.listen((mode) {
-       print("Activation Triggered: $mode");
-       if (mode == "NAVIGATION_MODE") {
-          _onModeChanged(NovaMode.navigation);
-       } else if (mode == "RECOGNITION_MODE") {
-          _onModeChanged(NovaMode.recognition);
-       } else if (mode == "EMERGENCY_MODE") {
-          _onModeChanged(NovaMode.emergency);
-       } else if (mode == "ACTIVATION_SCREEN") {
-          // Navigate back to Activation Screen
-          Navigator.of(context).pushAndRemoveUntil(
-            MaterialPageRoute(builder: (context) => const ActivationScreen()),
-            (route) => false,
-          );
-       }
+      print("Activation Triggered: $mode");
+      if (mode == "NAVIGATION_MODE") {
+        _onModeChanged(NovaMode.navigation);
+      } else if (mode == "RECOGNITION_MODE") {
+        _onModeChanged(NovaMode.recognition);
+      } else if (mode == "EMERGENCY_MODE") {
+        _onModeChanged(NovaMode.emergency);
+      } else if (mode == "ACTIVATION_SCREEN") {
+        // Navigate back to Activation Screen
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (context) => const ActivationScreen()),
+          (route) => false,
+        );
+      }
     });
 
     // Run async initialization in the correct order
@@ -80,19 +84,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _initialize() async {
-    // 1. Load settings first — must complete before TTS reads them
-    await _loadSettings();
-    // 2. Apply settings to TTS
-    await _initializeTTS();
-    // 3. Start camera
-    await _initializeCamera();
-    // 4. Start Voice Listener for "Start NOVA"
-    ActivationService.instance.startVoiceListener();
+    try {
+      // 1. Load settings first — must complete before TTS reads them
+      await _loadSettings();
+      // 2. Apply settings to TTS
+      await _initializeTTS();
+      // 3. Start camera
+      await _initializeCamera();
+      // 4. Backend health check for status indicator
+      await _checkBackendConnection();
+      // 5. Start Voice Listener for "Start NOVA"
+      ActivationService.instance.startVoiceListener();
+    } catch (e) {
+      print('[NOVA DEBUG] ❌ Initialization failed: $e');
+      _updateStatus('Initialization failed. Tap Retry.');
+    }
   }
 
   Future<void> _loadSettings() async {
     _settings = await _settingsService.loadSettings();
-    print('[NOVA DEBUG] Settings loaded: speechRate=${_settings.speechRate}, autoDetection=${_settings.autoDetection}');
+    print(
+        '[NOVA DEBUG] Settings loaded: speechRate=${_settings.speechRate}, autoDetection=${_settings.autoDetection}');
   }
 
   Future<void> _initializeTTS() async {
@@ -113,12 +125,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       _controller = CameraController(
         _cameras![0],
-        ResolutionPreset.medium,
+        ResolutionPreset.low,
         enableAudio: false,
       );
 
       await _controller!.initialize();
-      print('[NOVA DEBUG] ✓ Camera initialized (Resolution: ${_controller!.value.previewSize})');
+      print(
+          '[NOVA DEBUG] ✓ Camera initialized (Resolution: ${_controller!.value.previewSize})');
 
       // Stop flash strictly
       await _controller!.setFlashMode(FlashMode.off);
@@ -128,7 +141,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       // It will be started later via _manageImageStream depending on mode.
 
       _updateStatus('Camera ready');
-      
+
       // Post-frame callback to log exact render time
       WidgetsBinding.instance.addPostFrameCallback((_) {
         print('[NOVA DEBUG] 🚀 UI FIRST FRAME RENDERED');
@@ -172,12 +185,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// Processes every 5th frame; skips if any inference is already running.
   /// Stream is NEVER stopped here — zero camera session restarts.
   void _onFrameAvailable(CameraImage cameraImage) {
-    if (!_isNavigationActive) return;    // hard lock — skip if navigation hasn't been started
-    if (EmergencyService.instance.isActive) return; // hard lock — skip during emergency
+    if (!_isNavigationActive)
+      return; // hard lock — skip if navigation hasn't been started
+    if (EmergencyService.instance.isActive)
+      return; // hard lock — skip during emergency
+
+    final now = DateTime.now();
+    if (now.difference(_lastFrameProcessedAt).inMilliseconds < 900) return;
+
     _frameCount++;
-    if (_frameCount % 5 != 0) return;   // process every 5th frame
-    if (_inferenceInProgress) return;    // hard lock — skip if busy
-    _inferenceInProgress = true;         // claim slot immediately (sync)
+    if (_frameCount % 12 != 0)
+      return; // process fewer frames to keep preview smooth
+    if (_inferenceInProgress) return; // hard lock — skip if busy
+
+    _lastFrameProcessedAt = now;
+    _inferenceInProgress = true; // claim slot immediately (sync)
     if (mounted) setState(() => _isProcessing = true);
     _runInferenceOnStreamFrame(cameraImage);
   }
@@ -195,11 +217,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
 
       final File imageFile = await _cameraImageToFile(cameraImage);
-      print('[NOVA DEBUG] === Stream frame → ${imageFile.path} (${imageFile.lengthSync()} bytes)');
+      print(
+          '[NOVA DEBUG] === Stream frame → ${imageFile.path} (${imageFile.lengthSync()} bytes)');
 
       // Check again before expensive API call
       if (EmergencyService.instance.isActive) {
-        print('[NOVA DEBUG] ⛔ Inference aborted before API call — emergency active.');
+        print(
+            '[NOVA DEBUG] ⛔ Inference aborted before API call — emergency active.');
         _inferenceInProgress = false;
         if (mounted) setState(() => _isProcessing = false);
         return;
@@ -236,7 +260,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<File> _cameraImageToFile(CameraImage cameraImage) async {
     final Uint8List jpegBytes = _convertCameraImageToJpeg(cameraImage);
     final dir = await getTemporaryDirectory();
-    final path = '${dir.path}/nova_frame_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final path =
+        '${dir.path}/nova_frame_${DateTime.now().millisecondsSinceEpoch}.jpg';
     final file = File(path);
     await file.writeAsBytes(jpegBytes, flush: true);
     return file;
@@ -249,39 +274,67 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     final format = cameraImage.format.group;
     if (format == ImageFormatGroup.yuv420) {
-      // Android: YUV420 → convert plane by plane
-      final int width  = cameraImage.width;
-      final int height = cameraImage.height;
-      final Uint8List yPlane  = cameraImage.planes[0].bytes;
-      final Uint8List uvPlane = cameraImage.planes[1].bytes;
-      
-      final int yRowStride  = cameraImage.planes[0].bytesPerRow;
-      final int uvRowStride = cameraImage.planes[1].bytesPerRow;
-      final int uvPixelStride = cameraImage.planes[1].bytesPerPixel ?? 2;
+      // Android path: keep full frame resolution for more reliable object detection.
+      final int srcWidth = cameraImage.width;
+      final int srcHeight = cameraImage.height;
+      final int outWidth = srcWidth;
+      final int outHeight = srcHeight;
 
-      final int yLength = yPlane.length;
-      final int uvLength = uvPlane.length;
+      final Uint8List yPlane = cameraImage.planes[0].bytes;
+      final int yRowStride = cameraImage.planes[0].bytesPerRow;
 
-      frame = img.Image(width: width, height: height);
-      for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-          final int yIdx = (y * yRowStride) + x;
-          if (yIdx >= yLength) continue;
-          final int yVal = yPlane[yIdx];
+      if (cameraImage.planes.length >= 3) {
+        final Uint8List uPlane = cameraImage.planes[1].bytes;
+        final Uint8List vPlane = cameraImage.planes[2].bytes;
+        final int uvRowStride = cameraImage.planes[1].bytesPerRow;
+        final int uvPixelStride = cameraImage.planes[1].bytesPerPixel ?? 1;
 
-          final int uvIdx = (y ~/ 2) * uvRowStride + (x ~/ 2) * uvPixelStride;
-          int uVal = 128;
-          int vVal = 128;
-          
-          if (uvIdx >= 0 && (uvIdx + 1) < uvLength) {
-            uVal = uvPlane[uvIdx];
-            vVal = uvPlane[uvIdx + 1];
+        frame = img.Image(width: outWidth, height: outHeight);
+        for (int oy = 0; oy < outHeight; oy++) {
+          final int sy = oy;
+          for (int ox = 0; ox < outWidth; ox++) {
+            final int sx = ox;
+
+            final int yIdx = sy * yRowStride + sx;
+            final int uvIdx =
+                (sy ~/ 2) * uvRowStride + (sx ~/ 2) * uvPixelStride;
+
+            if (yIdx < 0 ||
+                yIdx >= yPlane.length ||
+                uvIdx < 0 ||
+                uvIdx >= uPlane.length ||
+                uvIdx >= vPlane.length) {
+              continue;
+            }
+
+            final int yVal = yPlane[yIdx];
+            final int uVal = uPlane[uvIdx];
+            final int vVal = vPlane[uvIdx];
+
+            final int c = yVal - 16;
+            final int d = uVal - 128;
+            final int e = vVal - 128;
+
+            final int r = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255);
+            final int g =
+                ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255);
+            final int b = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255);
+
+            frame.setPixelRgb(ox, oy, r, g, b);
           }
-
-          final int r = (yVal + 1.402 * (vVal - 128)).round().clamp(0, 255);
-          final int g = (yVal - 0.344136 * (uVal - 128) - 0.714136 * (vVal - 128)).round().clamp(0, 255);
-          final int b = (yVal + 1.772 * (uVal - 128)).round().clamp(0, 255);
-          frame.setPixelRgb(x, y, r, g, b);
+        }
+      } else {
+        // Rare fallback: grayscale if U/V planes are unavailable.
+        frame = img.Image(width: outWidth, height: outHeight);
+        for (int oy = 0; oy < outHeight; oy++) {
+          final int sy = oy;
+          for (int ox = 0; ox < outWidth; ox++) {
+            final int sx = ox;
+            final int yIdx = sy * yRowStride + sx;
+            if (yIdx < 0 || yIdx >= yPlane.length) continue;
+            final int luma = yPlane[yIdx];
+            frame.setPixelRgb(ox, oy, luma, luma, luma);
+          }
         }
       }
     } else if (format == ImageFormatGroup.bgra8888) {
@@ -348,8 +401,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _manageImageStream() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
 
-    final bool shouldStream =
-        (_currentMode == NovaMode.navigation || _currentMode == NovaMode.recognition) &&
+    final bool shouldStream = (_currentMode == NovaMode.navigation ||
+            _currentMode == NovaMode.recognition ||
+            _currentMode == NovaMode.reading) &&
         _settings.autoDetection &&
         _isNavigationActive &&
         !EmergencyService.instance.isActive;
@@ -359,12 +413,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         // Delay stream start by 300ms to avoid UI freeze during mode switch
         print('[NOVA DEBUG] Delaying stream start for 300ms...');
         await Future.delayed(const Duration(milliseconds: 300));
-        if (mounted && _controller!.value.isInitialized && !_controller!.value.isStreamingImages &&
-            (_currentMode == NovaMode.navigation || _currentMode == NovaMode.recognition) &&
-            _isNavigationActive && !EmergencyService.instance.isActive) {
+        if (mounted &&
+            _controller!.value.isInitialized &&
+            !_controller!.value.isStreamingImages &&
+            (_currentMode == NovaMode.navigation ||
+                _currentMode == NovaMode.recognition ||
+                _currentMode == NovaMode.reading) &&
+            _isNavigationActive &&
+            !EmergencyService.instance.isActive) {
           try {
             await _controller!.startImageStream(_onFrameAvailable);
-            print('[NOVA DEBUG] ✓ Image stream started for ${_currentMode.label} Mode');
+            print(
+                '[NOVA DEBUG] ✓ Image stream started for ${_currentMode.label} Mode');
           } catch (e) {
             print('[NOVA DEBUG] ❌ Failed to start image stream: $e');
           }
@@ -374,9 +434,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (_controller!.value.isStreamingImages) {
         try {
           await _controller!.stopImageStream();
-          print('[NOVA DEBUG] ✓ Image stream stopped (mode: ${_currentMode.label})');
+          print(
+              '[NOVA DEBUG] ✓ Image stream stopped (mode: ${_currentMode.label})');
         } catch (e) {
-             print('[NOVA DEBUG] ❌ Failed to stop image stream: $e');
+          print('[NOVA DEBUG] ❌ Failed to stop image stream: $e');
         }
       }
     }
@@ -389,11 +450,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     setState(() {
       _isNavigationActive = true;
-      
+
       // Build list of allowed modes according to feature flags
       final allowedModes = <NovaMode>[NovaMode.navigation];
       if (NovaConfig.enableOCR) allowedModes.add(NovaMode.reading);
-      if (NovaConfig.enableRecognitionMode) allowedModes.add(NovaMode.recognition);
+      if (NovaConfig.enableRecognitionMode)
+        allowedModes.add(NovaMode.recognition);
 
       // Ensure current mode exists in allowedModes; if not, reset to first
       int idx = allowedModes.indexOf(_currentMode);
@@ -442,7 +504,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (wasStreaming && mounted && _controller!.value.isInitialized) {
         await _controller!.startImageStream(_onFrameAvailable);
       }
-      print('[NOVA DEBUG] Manual capture: ${imageFile.path} (${imageFile.lengthSync()} bytes)');
+      print(
+          '[NOVA DEBUG] Manual capture: ${imageFile.path} (${imageFile.lengthSync()} bytes)');
 
       final result = await _runModeInference(imageFile);
 
@@ -463,8 +526,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _inferenceInProgress = false;
       if (mounted) setState(() => _isProcessing = false);
       // Ensure stream is restored on error
-      if (mounted && _settings.autoDetection &&
-          _controller != null && _controller!.value.isInitialized &&
+      if (mounted &&
+          _settings.autoDetection &&
+          _controller != null &&
+          _controller!.value.isInitialized &&
           !_controller!.value.isStreamingImages) {
         await _controller!.startImageStream(_onFrameAvailable);
       }
@@ -474,10 +539,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// Navigation Mode: Obstacle detection + depth estimation + guidance
   Future<ModeInferenceResult> _captureNavigation(File imageFile) async {
     try {
-      print('[NOVA DEBUG] Mode: NAVIGATION | Calling getNavigationGuidance API...');
+      print(
+          '[NOVA DEBUG] Mode: NAVIGATION | Calling getNavigationGuidance API...');
       final startTime = DateTime.now();
 
-      final result = await _inferenceService.processFrame(imageFile, NovaMode.navigation);
+      final result =
+          await _inferenceService.processFrame(imageFile, NovaMode.navigation);
 
       final elapsed = DateTime.now().difference(startTime).inMilliseconds;
 
@@ -488,14 +555,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         print('[NOVA DEBUG] ✓ Navigation inference successful (${elapsed}ms)');
         print('[NOVA DEBUG] - Guidance: "${result.guidance}"');
         print('[NOVA DEBUG] - Obstacles detected: ${result.detections.length}');
-        
+
         // Validate parsed data
         if (result.detections.isEmpty) {
           print('[NOVA DEBUG] ℹ️  No obstacles detected in scene');
         } else {
           for (int i = 0; i < result.detections.length; i++) {
             final det = result.detections[i];
-            print('[NOVA DEBUG] Detection $i: ${det.label} (${(det.confidence * 100).toStringAsFixed(1)}%) - bbox(l:${det.bbox.left.toStringAsFixed(0)}, t:${det.bbox.top.toStringAsFixed(0)}, r:${det.bbox.right.toStringAsFixed(0)}, b:${det.bbox.bottom.toStringAsFixed(0)})');
+            print(
+                '[NOVA DEBUG] Detection $i: ${det.label} (${(det.confidence * 100).toStringAsFixed(1)}%) - bbox(l:${det.bbox.left.toStringAsFixed(0)}, t:${det.bbox.top.toStringAsFixed(0)}, r:${det.bbox.right.toStringAsFixed(0)}, b:${det.bbox.bottom.toStringAsFixed(0)})');
           }
         }
       }
@@ -509,7 +577,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// Reading Mode: OCR text extraction
   Future<ModeInferenceResult> _captureReading(File imageFile) async {
     if (!NovaConfig.enableOCR) {
-      print('[NOVA DEBUG] READING mode is disabled via configuration — skipping inference.');
+      print(
+          '[NOVA DEBUG] READING mode is disabled via configuration — skipping inference.');
       return ModeInferenceResult.error('Reading mode disabled');
     }
 
@@ -517,7 +586,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       print('[NOVA DEBUG] Mode: READING | Calling recognizeText API...');
       final startTime = DateTime.now();
 
-      final result = await _inferenceService.processFrame(imageFile, NovaMode.reading);
+      final result =
+          await _inferenceService.processFrame(imageFile, NovaMode.reading);
 
       final elapsed = DateTime.now().difference(startTime).inMilliseconds;
 
@@ -526,15 +596,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         print('[NOVA DEBUG] Error: ${result.error}');
       } else {
         print('[NOVA DEBUG] ✓ OCR inference successful (${elapsed}ms)');
-        print('[NOVA DEBUG] - Text regions extracted: ${result.textRegions.length}');
-        
+        print(
+            '[NOVA DEBUG] - Text regions extracted: ${result.textRegions.length}');
+
         // Validate parsed data
         if (result.textRegions.isEmpty) {
           print('[NOVA DEBUG] ℹ️  No text regions detected');
         } else {
           for (int i = 0; i < result.textRegions.length; i++) {
             final text = result.textRegions[i];
-            print('[NOVA DEBUG] Text $i: "${text.text}" (conf:${(text.confidence * 100).toStringAsFixed(1)}%) - bbox(l:${text.bbox.left.toStringAsFixed(0)}, t:${text.bbox.top.toStringAsFixed(0)}, r:${text.bbox.right.toStringAsFixed(0)}, b:${text.bbox.bottom.toStringAsFixed(0)})');
+            print(
+                '[NOVA DEBUG] Text $i: "${text.text}" (conf:${(text.confidence * 100).toStringAsFixed(1)}%) - bbox(l:${text.bbox.left.toStringAsFixed(0)}, t:${text.bbox.top.toStringAsFixed(0)}, r:${text.bbox.right.toStringAsFixed(0)}, b:${text.bbox.bottom.toStringAsFixed(0)})');
           }
         }
       }
@@ -548,15 +620,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// Recognition Mode: Face + Object detection
   Future<ModeInferenceResult> _captureRecognition(File imageFile) async {
     if (!NovaConfig.enableRecognitionMode) {
-      print('[NOVA DEBUG] RECOGNITION mode is disabled via configuration — skipping inference.');
+      print(
+          '[NOVA DEBUG] RECOGNITION mode is disabled via configuration — skipping inference.');
       return ModeInferenceResult.error('Recognition mode disabled');
     }
 
     try {
-      print('[NOVA DEBUG] Mode: RECOGNITION | Calling detectFaces + detectObjects APIs...');
+      print(
+          '[NOVA DEBUG] Mode: RECOGNITION | Calling detectFaces + detectObjects APIs...');
       final startTime = DateTime.now();
 
-      final result = await _inferenceService.processFrame(imageFile, NovaMode.recognition);
+      final result =
+          await _inferenceService.processFrame(imageFile, NovaMode.recognition);
 
       final elapsed = DateTime.now().difference(startTime).inMilliseconds;
 
@@ -568,7 +643,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         print('[NOVA DEBUG] - Faces detected: ${result.faces.length}');
         print('[NOVA DEBUG] - Objects detected: ${result.detections.length}');
         print('[NOVA DEBUG] - Inference time: ${result.inferenceTimeMs}ms');
-        
+
         // Validate parsed data
         if (result.faces.isEmpty && result.detections.isEmpty) {
           print('[NOVA DEBUG] ℹ️  No faces or objects detected');
@@ -576,13 +651,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           if (result.faces.isNotEmpty) {
             for (int i = 0; i < result.faces.length; i++) {
               final face = result.faces[i];
-              print('[NOVA DEBUG] Face $i: ID=${face.personId ?? "unknown"} (conf:${(face.confidence * 100).toStringAsFixed(1)}%) - bbox(l:${face.bbox.left.toStringAsFixed(0)}, t:${face.bbox.top.toStringAsFixed(0)}, r:${face.bbox.right.toStringAsFixed(0)}, b:${face.bbox.bottom.toStringAsFixed(0)})');
+              print(
+                  '[NOVA DEBUG] Face $i: ID=${face.personId ?? "unknown"} (conf:${(face.confidence * 100).toStringAsFixed(1)}%) - bbox(l:${face.bbox.left.toStringAsFixed(0)}, t:${face.bbox.top.toStringAsFixed(0)}, r:${face.bbox.right.toStringAsFixed(0)}, b:${face.bbox.bottom.toStringAsFixed(0)})');
             }
           }
           if (result.detections.isNotEmpty) {
             for (int i = 0; i < result.detections.length; i++) {
               final det = result.detections[i];
-              print('[NOVA DEBUG] Object $i: ${det.label} (conf:${(det.confidence * 100).toStringAsFixed(1)}%) - bbox(l:${det.bbox.left.toStringAsFixed(0)}, t:${det.bbox.top.toStringAsFixed(0)}, r:${det.bbox.right.toStringAsFixed(0)}, b:${det.bbox.bottom.toStringAsFixed(0)})');
+              print(
+                  '[NOVA DEBUG] Object $i: ${det.label} (conf:${(det.confidence * 100).toStringAsFixed(1)}%) - bbox(l:${det.bbox.left.toStringAsFixed(0)}, t:${det.bbox.top.toStringAsFixed(0)}, r:${det.bbox.right.toStringAsFixed(0)}, b:${det.bbox.bottom.toStringAsFixed(0)})');
             }
           }
         }
@@ -632,11 +709,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// Color-coded navigation command banner
   Color _commandBannerColor() {
     switch (_navCommand) {
-      case 'STOP':       return Colors.red.shade700;
-      case 'CAUTION':    return Colors.orange.shade700;
-      case 'MOVE_LEFT':  return Colors.deepOrange;
-      case 'MOVE_RIGHT': return Colors.deepOrange;
-      default:           return Colors.green.shade700;
+      case 'STOP':
+        return Colors.red.shade700;
+      case 'CAUTION':
+        return Colors.orange.shade700;
+      case 'MOVE_LEFT':
+        return Colors.deepOrange;
+      case 'MOVE_RIGHT':
+        return Colors.deepOrange;
+      default:
+        return Colors.green.shade700;
     }
   }
 
@@ -666,7 +748,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         print('[NOVA DEBUG] Resuming after emergency — reinitializing camera.');
         _reinitializeCameraAfterEmergency();
       } else {
-        print('[NOVA DEBUG] Resumed but emergency still active — staying paused.');
+        print(
+            '[NOVA DEBUG] Resumed but emergency still active — staying paused.');
       }
     }
   }
@@ -735,6 +818,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   fontSize: 16,
                 ),
                 textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _initialize,
+                child: const Text('Retry'),
               ),
             ],
           ),
@@ -897,7 +985,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               ),
 
-            // Bottom control bar — emergency left, camera right
+            // Bottom control bar — centered emergency only
             Positioned(
               bottom: 0,
               left: 0,
@@ -905,54 +993,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: SafeArea(
                 top: false,
                 child: Padding(
-                  padding: const EdgeInsets.only(
-                    left: 30,
-                    right: 30,
-                    bottom: 20,
-                    top: 12,
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    mainAxisSize: MainAxisSize.max,
+                  padding: const EdgeInsets.only(bottom: 20, top: 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      // Emergency button (always visible)
-                      Expanded(
-                        child: Align(
-                          alignment: _currentMode == NovaMode.navigation
-                              ? Alignment.center
-                              : Alignment.centerLeft,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onLongPress: () {
-                              print('[NOVA DEBUG] 🚨 Emergency button LONG-PRESSED. isActive=${EmergencyService.instance.isActive}');
-                              // Use microtask to yield UI thread before starting heavy async work
-                              Future.microtask(() => EmergencyService.instance.triggerEmergency(_tts));
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: Colors.red.withOpacity(0.7),
-                                borderRadius: BorderRadius.circular(50),
-                              ),
-                              child: const Icon(
-                                Icons.emergency,
-                                color: Colors.white,
-                                size: 30,
-                              ),
+                      Center(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onLongPress: () {
+                            print(
+                                '[NOVA DEBUG] 🚨 Emergency button LONG-PRESSED. isActive=${EmergencyService.instance.isActive}');
+                            Future.microtask(() => EmergencyService.instance
+                                .triggerEmergency(_tts));
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withOpacity(0.7),
+                              borderRadius: BorderRadius.circular(50),
+                            ),
+                            child: const Icon(
+                              Icons.emergency,
+                              color: Colors.white,
+                              size: 30,
                             ),
                           ),
                         ),
                       ),
-
-                      // Camera capture button (hidden in navigation mode)
-                      if (_currentMode != NovaMode.navigation)
-                        FloatingActionButton(
-                          onPressed: _inferenceInProgress ? null : _captureAndProcess,
-                          backgroundColor:
-                              _inferenceInProgress ? Colors.grey : Colors.yellow,
-                          foregroundColor: Colors.black,
-                          child: const Icon(Icons.camera_alt),
-                        ),
                     ],
                   ),
                 ),

@@ -41,6 +41,57 @@ class DetectionPostprocessor:
         return DetectionPostprocessor.filter_detections_by_confidence(detections, confidence_threshold)
     
     @staticmethod
+    def categorize_detections_by_priority(detections: List[DetectionResult]) -> Tuple[List[DetectionResult], List[DetectionResult]]:
+        """Categorize detections into high-priority (alert) and low-priority (quiet) objects.
+        
+        High-priority (alert): car, truck, bus, person, motorcycle, bicycle, dog, cat
+        Low-priority (quiet): laptop, phone, backpack, bottle, cup, handbag, etc.
+        
+        Returns:
+            Tuple of (alert_detections, quiet_detections)
+        """
+        # Objects that warrant immediate alerts (obstacles/hazards/people)
+        alert_objects = {
+            'car', 'truck', 'bus', 'person', 'motorcycle', 'bicycle', 'scooter',
+            'dog', 'cat', 'bear', 'elephant', 'horse',  # Animals
+            'stop sign', 'traffic light', 'fire hydrant',  # Street hazards
+        }
+        
+        # Objects that should be announced quietly (small/harmless items)
+        quiet_objects = {
+            'laptop', 'phone', 'tablet', 'computer', 'keyboard', 'mouse',
+            'backpack', 'suitcase', 'handbag', 'bag', 'purse',
+            'bottle', 'cup', 'glass', 'chair', 'table', 'desk',
+            'book', 'pen', 'watch', 'shoe', 'hat', 'umbrella',
+        }
+        
+        alert_detections = []
+        quiet_detections = []
+        
+        for detection in detections:
+            label_lower = detection.label.lower()
+            
+            # Check if exact match in alert set
+            if label_lower in alert_objects:
+                alert_detections.append(detection)
+                logger.debug(f"Alert object: {detection.label}")
+            # Check if exact match in quiet set
+            elif label_lower in quiet_objects:
+                quiet_detections.append(detection)
+                logger.debug(f"Quiet object: {detection.label}")
+            # Default behavior: if label contains common alert keywords, alert
+            elif any(keyword in label_lower for keyword in ['person', 'car', 'truck', 'bus', 'bike', 'motorcycle']):
+                alert_detections.append(detection)
+                logger.debug(f"Alert object (keyword match): {detection.label}")
+            # Otherwise treat as quiet
+            else:
+                quiet_detections.append(detection)
+                logger.debug(f"Quiet object (default): {detection.label}")
+        
+        logger.info(f"Object categorization: {len(alert_detections)} alert + {len(quiet_detections)} quiet = {len(detections)} total")
+        return alert_detections, quiet_detections
+    
+    @staticmethod
     def normalize_bounding_boxes(detections: List[DetectionResult], image_width: int, image_height: int) -> List[DetectionResult]:
         """Normalize bounding box coordinates to [0, 1] range."""
         normalized_detections = []

@@ -21,26 +21,23 @@ os.environ.setdefault("FLAGS_new_executor", "0")
 OCR_BACKEND = os.environ.get("NOVA_OCR_BACKEND", "easyocr").strip().lower()
 PaddleOCR = None
 easyocr = None
-OCR_AVAILABLE = False
 
 # Try to import backends gracefully
 try:
     import easyocr
     OCR_BACKEND = "easyocr"
-    OCR_AVAILABLE = True
     logger.info("EasyOCR found - using as backend")
 except ImportError:
+    logger.warning("EasyOCR not available, trying PaddleOCR")
     try:
         from paddleocr import PaddleOCR
         OCR_BACKEND = "paddleocr"
-        OCR_AVAILABLE = True
         logger.info("PaddleOCR found - using as backend")
     except ImportError:
-        logger.warning("Neither EasyOCR nor PaddleOCR available - OCR will be disabled")
+        logger.error("Neither EasyOCR nor PaddleOCR available - OCR will be disabled")
         OCR_BACKEND = None
         PaddleOCR = None
         easyocr = None
-        OCR_AVAILABLE = False
 
 
 class PaddleOCRDetector:
