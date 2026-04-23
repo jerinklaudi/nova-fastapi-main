@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import '../models/detection_models.dart';
 import '../services/api_service.dart';
@@ -24,6 +25,28 @@ class ModeInferenceService {
   String _lastRecognitionPhrase = '';
   DateTime _lastRecognitionSpeechTime = DateTime(2000);
   static const int _recognitionCooldownSeconds = 8;
+  static const int _minStableFramesForFaceRecognition = 2;
+  static const int _minStableFramesForObjectRecognition = 1;
+  static const double _minFaceConfidenceForRecognition = 0.35;
+  static const double _minObjectConfidenceForRecognition = 0.25;
+  final Map<String, int> _recognitionStreaks = {};
+
+  // === Navigation false-positive suppression ===
+  static const int _minStableFramesForNavigation = 2;
+  static const double _navigationAlertMinConfidence = 0.50;
+  static const double _navigationMinAreaRatio = 0.015;
+  final Map<String, int> _navigationStreaks = {};
+  static const Set<String> _navigationAlertLabels = {
+    'person',
+    'car',
+    'truck',
+    'bus',
+    'motorcycle',
+    'bicycle',
+    'dog',
+    'cat',
+    'scooter',
+  };
 
   // === Navigation guidance debounce ===
   String _lastNavigationPhrase = '';
@@ -93,29 +116,32 @@ class ModeInferenceService {
         rethrow;
       }
 
-      // Speak a short navigation summary built from the actual detections.
-      final guidanceText = response.guidance.guidance;
-      final navCommand = _extractCommand(guidanceText);
-      final objectSummary = response.guidance.obstacles.isEmpty
+      final filteredObstacles =
+          _filterStableNavigationObstacles(response.guidance.obstacles);
+
+      // Build guidance from filtered obstacles to suppress random detections.
+      final guidanceText = _buildNavigationGuidanceText(filteredObstacles);
+      final navCommand = _deriveNavigationCommandFromObstacles(filteredObstacles);
+      final objectSummary = filteredObstacles.isEmpty
           ? ''
-          : response.guidance.obstacles.map((d) => d.label).toSet().join(', ');
+          : filteredObstacles.map((d) => d.label).toSet().join(', ');
       final warningSummary = response.guidance.safetyWarnings.join('. ');
       final speechParts = <String>[];
       final commandSpeech = _navigationCommandSpeech(navCommand);
+      final dangerDirection = _buildDangerDirectionPhrase(filteredObstacles);
       if (objectSummary.isNotEmpty) {
-        // Changed from "I see X" to "Detected X object ahead"
-        final objectCount = response.guidance.obstacles.length;
+        final objectCount = filteredObstacles.length;
         speechParts.add(
             'Detected $objectSummary object${objectCount > 1 ? 's' : ''} ahead');
+      }
+      if (dangerDirection.isNotEmpty) {
+        speechParts.add(dangerDirection);
       }
       if (commandSpeech.isNotEmpty) {
         speechParts.add(commandSpeech);
       }
       if (warningSummary.isNotEmpty) {
         speechParts.add(warningSummary);
-      }
-      if (guidanceText.isNotEmpty && commandSpeech.isEmpty) {
-        speechParts.add(guidanceText);
       }
       final navigationSpeech =
           _normalizeNavigationSpeech(speechParts.join('. '));
@@ -138,7 +164,7 @@ class ModeInferenceService {
           _lastNavigationPhrase = navigationSpeech;
           _lastNavigationCommand = navCommand;
           _lastNavigationSpeechTime = now;
-          final volume = _computeNavigationVolume(response.guidance.obstacles);
+          final volume = _computeNavigationVolume(filteredObstacles);
           debugPrint('[NAV][MODE] ► TTS: "$navigationSpeech"');
           debugPrint('[NAV][MODE] ► TTS volume: ${volume.toStringAsFixed(2)}');
           await tts.stop();
@@ -172,7 +198,7 @@ class ModeInferenceService {
       }
 
       return ModeInferenceResult.success(
-        detections: response.guidance.obstacles,
+        detections: filteredObstacles,
         guidance: guidanceText,
         inferenceTimeMs: response.inferenceTimeMs,
         heatmapBytes: heatmapBytes,
@@ -184,24 +210,6 @@ class ModeInferenceService {
       await tts.speak('Navigation error. Retrying.');
       return ModeInferenceResult.error(e.toString());
     }
-  }
-
-  /// Extract a canonical command tag from guidance text for logic branching
-  String _extractCommand(String guidance) {
-    final g = guidance.toLowerCase();
-    if (g.contains('stop')) return 'STOP';
-    if (g.contains('slow down') || g.contains('caution')) return 'CAUTION';
-    if (g.contains('move left') ||
-        g.contains('go left') ||
-        g.contains('keep left')) {
-      return 'MOVE_LEFT';
-    }
-    if (g.contains('move right') ||
-        g.contains('go right') ||
-        g.contains('keep right')) {
-      return 'MOVE_RIGHT';
-    }
-    return 'PATH_CLEAR';
   }
 
   String _normalizeNavigationSpeech(String text) {
@@ -308,45 +316,163 @@ class ModeInferenceService {
     }
 
     try {
-      // Get both face and object detections
-      final faceResult = await ApiService.detectFaces(
-        imageFile,
-        confidenceThreshold: NovaConfig.faceDetectionThreshold,
-        recognizeFaces: true,
+      FaceDetectionResponse faceResponse = FaceDetectionResponse(
+        faces: const [],
+        inferenceTimeMs: 0.0,
       );
-      final objectResult = await ApiService.detectObjects(
-        imageFile,
-        confidenceThreshold: NovaConfig.objectDetectionThreshold,
+      ObjectDetectionResponse objectResponse = ObjectDetectionResponse(
+        detections: const [],
+        inferenceTimeMs: 0.0,
       );
 
-      final faceResponse = FaceDetectionResponse.fromJson(faceResult);
-      final objectResponse = ObjectDetectionResponse.fromJson(objectResult);
+      try {
+        final faceResult = await ApiService.detectFaces(
+          imageFile,
+          confidenceThreshold: _minFaceConfidenceForRecognition,
+          recognizeFaces: true,
+        );
+        faceResponse = FaceDetectionResponse.fromJson(faceResult);
+      } catch (e) {
+        debugPrint('[REC][MODE] Face recognition call failed: $e');
+      }
+
+      try {
+        final objectResult = await ApiService.detectObjects(
+          imageFile,
+          confidenceThreshold: _minObjectConfidenceForRecognition,
+        );
+        objectResponse = ObjectDetectionResponse.fromJson(objectResult);
+      } catch (e) {
+        debugPrint('[REC][MODE] Object detection call failed: $e');
+      }
+
+      List<Map<String, dynamic>> registeredObjects = const [];
+      try {
+        registeredObjects = await ApiService.listRegisteredObjects();
+      } catch (e) {
+        debugPrint('[REC][MODE] Registered object list failed: $e');
+      }
+
+      final registeredLabelToName = <String, String>{};
+      final registeredPriority = <String, bool>{};
+      for (final obj in registeredObjects) {
+        final label = _normalizeObjectLabel(
+            (obj['target_label'] ?? '').toString().toLowerCase());
+        final name = (obj['name'] ?? '').toString();
+        if (label.isNotEmpty && name.isNotEmpty) {
+          registeredLabelToName[label] = name;
+          registeredPriority[label] = (obj['is_priority'] ?? false) == true;
+        }
+      }
+
+      final recognizedObjectDetections = <Detection>[];
+      final recognizedObjectRawLabel = <String, String>{};
+      final seenRecognitionKeys = <String>{};
+
+      for (final detection in objectResponse.detections) {
+        final label = _normalizeObjectLabel(detection.label.toLowerCase());
+        if (detection.confidence < _minObjectConfidenceForRecognition) {
+          continue;
+        }
+        final registeredName = registeredLabelToName[label];
+        if (registeredName != null) {
+          final key = 'obj:$registeredName';
+          final streak = (_recognitionStreaks[key] ?? 0) + 1;
+          _recognitionStreaks[key] = streak;
+          seenRecognitionKeys.add(key);
+
+          if (streak < _minStableFramesForObjectRecognition) {
+            continue;
+          }
+
+          recognizedObjectDetections.add(
+            Detection(
+              label: registeredName,
+              confidence: detection.confidence,
+              bbox: detection.bbox,
+              distance: detection.distance,
+            ),
+          );
+          recognizedObjectRawLabel[registeredName.toLowerCase()] = label;
+        }
+      }
+
+      final stableFaceNames = <String>[];
+      final stableRecognizedFaces = <Face>[];
+      for (final face in faceResponse.faces) {
+        final id = face.personId;
+        if (id == null || id.isEmpty || id == 'unknown') {
+          continue;
+        }
+        if (face.confidence < _minFaceConfidenceForRecognition) {
+          continue;
+        }
+        final key = 'face:$id';
+        final streak = (_recognitionStreaks[key] ?? 0) + 1;
+        _recognitionStreaks[key] = streak;
+        seenRecognitionKeys.add(key);
+        if (streak >= _minStableFramesForFaceRecognition) {
+          stableFaceNames.add(id);
+          stableRecognizedFaces.add(
+            Face(
+              confidence: face.confidence,
+              bbox: face.bbox,
+              personId: id,
+              embedding: face.embedding,
+            ),
+          );
+        }
+      }
+
+      _decayRecognitionStreaks(seenRecognitionKeys);
 
       // Build a speech phrase from detections
       final parts = <String>[];
 
-      if (faceResponse.faces.isNotEmpty) {
-        for (final face in faceResponse.faces) {
-          final id = face.personId;
-          if (id != null && id.isNotEmpty && id != 'unknown') {
-            parts.add('I can see $id');
-          }
-        }
-        // Count unknowns
-        final unknowns = faceResponse.faces
-            .where((f) =>
-                f.personId == null ||
-                f.personId == 'unknown' ||
-                f.personId!.isEmpty)
-            .length;
-        if (unknowns > 0) {
-          parts.add("$unknowns unknown face${unknowns > 1 ? 's' : ''}");
+      if (stableFaceNames.isNotEmpty) {
+        for (final id in stableFaceNames.toSet()) {
+          parts.add('I can see $id');
         }
       }
 
-      if (objectResponse.detections.isNotEmpty) {
-        parts.add(
-            "${objectResponse.detections.length} object${objectResponse.detections.length > 1 ? 's' : ''} detected");
+      if (faceResponse.faces.isNotEmpty) {
+        // Count unknowns
+        final unknowns = faceResponse.faces
+            .where((f) =>
+                f.confidence >= _minFaceConfidenceForRecognition &&
+            (f.personId == null ||
+              f.personId == 'unknown' ||
+              f.personId!.isEmpty))
+            .length;
+        if (unknowns > 0) {
+          parts.add(unknowns == 1
+              ? 'Unknown person found'
+              : '$unknowns unknown people found');
+        }
+      }
+
+      if (recognizedObjectDetections.isNotEmpty) {
+        final priorityObjects = recognizedObjectDetections
+            .where((d) {
+              final rawLabel = recognizedObjectRawLabel[d.label.toLowerCase()];
+              return rawLabel != null && registeredPriority[rawLabel] == true;
+            })
+            .map((d) => d.label)
+            .toList();
+        final normalObjects = recognizedObjectDetections
+            .where((d) {
+              final rawLabel = recognizedObjectRawLabel[d.label.toLowerCase()];
+              return rawLabel == null || registeredPriority[rawLabel] != true;
+            })
+            .map((d) => d.label)
+            .toList();
+
+        if (priorityObjects.isNotEmpty) {
+          parts.add('Priority object detected: ${priorityObjects.join(', ')}');
+        }
+        if (normalObjects.isNotEmpty) {
+          parts.add('Detected ${normalObjects.join(', ')}');
+        }
       }
 
       // === 8-second recognition debounce ===
@@ -361,6 +487,9 @@ class ModeInferenceService {
         if (isDifferent || cooldownPassed) {
           _lastRecognitionPhrase = phrase;
           _lastRecognitionSpeechTime = now;
+          if (recognizedObjectDetections.isNotEmpty) {
+            SystemSound.play(SystemSoundType.alert);
+          }
           await tts.stop();
           await tts.speak(phrase);
         }
@@ -368,8 +497,8 @@ class ModeInferenceService {
       // Do NOT speak "No objects or faces detected" — avoid spam
 
       return ModeInferenceResult.success(
-        detections: objectResponse.detections,
-        faces: faceResponse.faces,
+        detections: recognizedObjectDetections,
+        faces: stableRecognizedFaces,
         inferenceTimeMs: faceResponse.inferenceTimeMs ?? 0.0,
       );
     } catch (e) {
@@ -381,6 +510,159 @@ class ModeInferenceService {
         await tts.speak('Recognition mode error');
       }
       return ModeInferenceResult.error(e.toString());
+    }
+  }
+
+  List<Detection> _filterStableNavigationObstacles(List<Detection> raw) {
+    final filtered = <Detection>[];
+    final seenKeys = <String>{};
+
+    for (final d in raw) {
+      final label = d.label.toLowerCase();
+      if (!_navigationAlertLabels.contains(label)) {
+        continue;
+      }
+      if (d.confidence < _navigationAlertMinConfidence) {
+        continue;
+      }
+
+      final width = (d.bbox.right - d.bbox.left).clamp(0.0, 1.0);
+      final height = (d.bbox.bottom - d.bbox.top).clamp(0.0, 1.0);
+      final area = width * height;
+      if (area < _navigationMinAreaRatio) {
+        continue;
+      }
+
+      final cx = (d.bbox.left + d.bbox.right) / 2.0;
+      final zone = cx < 0.33
+          ? 'left'
+          : (cx > 0.67 ? 'right' : 'center');
+      final key = 'nav:$label:$zone';
+      final streak = (_navigationStreaks[key] ?? 0) + 1;
+      _navigationStreaks[key] = streak;
+      seenKeys.add(key);
+
+      if (streak >= _minStableFramesForNavigation) {
+        filtered.add(d);
+      }
+    }
+
+    _decayNavigationStreaks(seenKeys);
+    return filtered;
+  }
+
+  String _buildDangerDirectionPhrase(List<Detection> obstacles) {
+    if (obstacles.isEmpty) return '';
+
+    Detection? best;
+    double bestScore = double.negativeInfinity;
+    for (final d in obstacles) {
+      final distance = d.distance ?? 0.0;
+      final width = (d.bbox.right - d.bbox.left).clamp(0.0, 1.0);
+      final height = (d.bbox.bottom - d.bbox.top).clamp(0.0, 1.0);
+      final area = width * height;
+      final score = distance > 0 ? (1.0 / (distance + 0.01)) : area;
+      if (score > bestScore) {
+        bestScore = score;
+        best = d;
+      }
+    }
+
+    if (best == null) return '';
+    final cx = (best.bbox.left + best.bbox.right) / 2.0;
+    final side = cx < 0.40
+        ? 'left'
+        : (cx > 0.60 ? 'right' : 'center');
+    if (side == 'center') {
+      return 'Danger ahead in center: ${best.label}';
+    }
+    return 'Danger on the $side: ${best.label}';
+  }
+
+  String _buildNavigationGuidanceText(List<Detection> obstacles) {
+    if (obstacles.isEmpty) {
+      return 'Clear path ahead.';
+    }
+    final phrase = _buildDangerDirectionPhrase(obstacles);
+    return phrase.isEmpty ? 'Proceed with caution.' : phrase;
+  }
+
+  String _deriveNavigationCommandFromObstacles(List<Detection> obstacles) {
+    if (obstacles.isEmpty) {
+      return 'PATH_CLEAR';
+    }
+
+    Detection? best;
+    double bestScore = double.negativeInfinity;
+    for (final d in obstacles) {
+      final distance = d.distance ?? 0.0;
+      final width = (d.bbox.right - d.bbox.left).clamp(0.0, 1.0);
+      final height = (d.bbox.bottom - d.bbox.top).clamp(0.0, 1.0);
+      final area = width * height;
+      final score = distance > 0 ? (1.0 / (distance + 0.01)) : area;
+      if (score > bestScore) {
+        bestScore = score;
+        best = d;
+      }
+    }
+
+    if (best == null) {
+      return 'CAUTION';
+    }
+
+    final cx = (best.bbox.left + best.bbox.right) / 2.0;
+    if (cx < 0.40) {
+      return 'MOVE_RIGHT';
+    }
+    if (cx > 0.60) {
+      return 'MOVE_LEFT';
+    }
+    return 'STOP';
+  }
+
+  void _decayRecognitionStreaks(Set<String> seenKeys) {
+    final keys = _recognitionStreaks.keys.toList();
+    for (final key in keys) {
+      if (seenKeys.contains(key)) {
+        continue;
+      }
+      final next = (_recognitionStreaks[key] ?? 0) - 1;
+      if (next <= 0) {
+        _recognitionStreaks.remove(key);
+      } else {
+        _recognitionStreaks[key] = next;
+      }
+    }
+  }
+
+  void _decayNavigationStreaks(Set<String> seenKeys) {
+    final keys = _navigationStreaks.keys.toList();
+    for (final key in keys) {
+      if (seenKeys.contains(key)) {
+        continue;
+      }
+      final next = (_navigationStreaks[key] ?? 0) - 1;
+      if (next <= 0) {
+        _navigationStreaks.remove(key);
+      } else {
+        _navigationStreaks[key] = next;
+      }
+    }
+  }
+
+  String _normalizeObjectLabel(String label) {
+    final value = label.trim().toLowerCase();
+    switch (value) {
+      case 'tvremote':
+      case 'remote control':
+        return 'remote';
+      case 'cell phone':
+      case 'mobile phone':
+        return 'phone';
+      case 'water bottle':
+        return 'bottle';
+      default:
+        return value;
     }
   }
 }

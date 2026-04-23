@@ -1,0 +1,22 @@
+{
+  "objects": [
+    {
+      "id": "2eea7a49-1079-4e67-a107-4951b4fa5105",
+      "name": "blue bottle",
+      "target_label": "bottle",
+      "is_priority": true,
+      "samples_used": 20,
+      "created_at": "2026-04-23T12:39:54.284860",
+      "updated_at": "2026-04-23T12:39:54.284860"
+    },
+    {
+      "id": "c8d2029e-9369-4093-990d-b4737a186c88",
+      "name": "remote",
+      "target_label": "remote",
+      "is_priority": false,
+      "samples_used": 20,
+      "created_at": "2026-04-23T12:41:52.063181",
+      "updated_at": "2026-04-23T12:41:52.063181"
+    }
+  ]
+}

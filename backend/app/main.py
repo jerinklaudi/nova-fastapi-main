@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import health, inference
 from app.api import face_registration
+from app.api import object_registration
 from app.core.config import settings
 from app.services.navigation_guidance import NavigationGuidanceService
 
@@ -54,6 +55,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/health", tags=["health"])
 app.include_router(inference.router, prefix="/detect", tags=["inference"])
 app.include_router(face_registration.router,prefix="/faces",tags=["Face Registration"])
+app.include_router(object_registration.router, prefix="/objects", tags=["Object Registration"])
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

@@ -25,7 +25,7 @@ class DetectionOverlayPainter extends CustomPainter {
                                 face.personId!.isNotEmpty && 
                                 face.personId != 'unknown';
       final Color boxColor = isRecognized ? Colors.green : Colors.red;
-      final String label = isRecognized ? face.personId! : 'Unknown';
+      final String label = isRecognized ? face.personId! : 'Unknown person';
 
       _drawBoundingBox(
         canvas,

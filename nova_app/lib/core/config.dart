@@ -3,7 +3,7 @@ class NovaConfig {
   /// Backend server configuration
   /// Single source of truth for backend connectivity.
   /// Change only these two values when your backend IP/port changes.
-  static const String backendHost = '172.26.234.31';
+  static const String backendHost = '10.135.226.151';
   static const int backendPort = 8000;
   static String get backendUrl => 'http://$backendHost:$backendPort';
 

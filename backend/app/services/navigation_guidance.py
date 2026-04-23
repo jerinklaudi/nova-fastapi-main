@@ -25,6 +25,20 @@ OCR_ENABLED = os.environ.get("NOVA_OCR_ENABLED", "0").strip().lower() not in ("0
 
 class NavigationGuidanceService:
     """Navigation guidance service using YOLO + MiDaS + OCR fusion."""
+
+    NAV_ALERT_LABELS = {
+        "person",
+        "car",
+        "truck",
+        "bus",
+        "motorcycle",
+        "bicycle",
+        "dog",
+        "cat",
+        "scooter",
+    }
+    NAV_MIN_CONFIDENCE = 0.50
+    NAV_MIN_AREA_RATIO = 0.015
     
     def __init__(self):
         logger.info("=" * 60)
@@ -330,6 +344,38 @@ class NavigationGuidanceService:
             enhanced_detections.append(enhanced_detection)
         
         return enhanced_detections
+
+    def _filter_navigation_candidates(
+        self,
+        detections: List[DetectionResult],
+    ) -> List[DetectionResult]:
+        """Keep only reliable obstacle candidates for navigation guidance."""
+        filtered: List[DetectionResult] = []
+        for d in detections:
+            label = (d.label or "").lower()
+            if label not in self.NAV_ALERT_LABELS:
+                continue
+
+            if float(d.confidence) < self.NAV_MIN_CONFIDENCE:
+                continue
+
+            width = max(0.0, float(d.bbox.right) - float(d.bbox.left))
+            height = max(0.0, float(d.bbox.bottom) - float(d.bbox.top))
+            area_ratio = width * height
+            if area_ratio < self.NAV_MIN_AREA_RATIO:
+                continue
+
+            filtered.append(d)
+
+        logger.info(
+            "Navigation candidate filter: %d -> %d (labels=%s, min_conf=%.2f, min_area=%.3f)",
+            len(detections),
+            len(filtered),
+            sorted(self.NAV_ALERT_LABELS),
+            self.NAV_MIN_CONFIDENCE,
+            self.NAV_MIN_AREA_RATIO,
+        )
+        return filtered
     
     def get_navigation_guidance(
         self,
@@ -398,6 +444,8 @@ class NavigationGuidanceService:
                         f"{d.label}:{d.confidence:.2f}" for d in yolo_detections[:5]
                     )
                     logger.info(f"Navigation YOLO sample detections: {sample}")
+
+            yolo_detections = self._filter_navigation_candidates(yolo_detections)
             
             # Categorize detections by priority (alert vs quiet)
             alert_detections, quiet_detections = self.postprocessor.categorize_detections_by_priority(yolo_detections)

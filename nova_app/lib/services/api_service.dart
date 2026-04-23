@@ -119,6 +119,203 @@ class ApiService {
     }
   }
 
+  /// Object registration: register one personalized object mapping
+  static Future<Map<String, dynamic>> registerObject({
+    required String name,
+    required String targetLabel,
+    bool isPriority = false,
+  }) async {
+    final uri = Uri.parse('$baseUrl/objects/register');
+
+    try {
+      final response = await http
+          .post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'name': name,
+              'target_label': targetLabel,
+              'is_priority': isPriority,
+            }),
+          )
+          .timeout(timeout);
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      throw Exception(
+          'Failed to register object: ${response.statusCode} ${response.body}');
+    } catch (e) {
+      throw Exception('Register object error: $e');
+    }
+  }
+
+  /// Object registration: send one camera frame
+  static Future<Map<String, dynamic>> registerObjectFrame({
+    required String name,
+    required String targetLabel,
+    required File imageFile,
+  }) async {
+    final uri = Uri.parse('$baseUrl/objects/register/frame');
+
+    try {
+      final request = http.MultipartRequest('POST', uri)
+        ..fields['name'] = name
+        ..fields['target_label'] = targetLabel
+        ..files.add(await http.MultipartFile.fromPath(
+          'image',
+          imageFile.path,
+          contentType: _imageMediaTypeForPath(imageFile.path),
+        ));
+
+      final response = await request.send().timeout(timeout);
+      final responseBody = await response.stream.bytesToString();
+
+      if (response.statusCode == 200) {
+        return jsonDecode(responseBody) as Map<String, dynamic>;
+      }
+      throw Exception(
+          'Failed to register object frame: ${response.statusCode} $responseBody');
+    } catch (e) {
+      throw Exception('Object frame registration error: $e');
+    }
+  }
+
+  /// Object registration: finalize and save buffered frames
+  static Future<Map<String, dynamic>> saveObjectRegistration({
+    required String name,
+    required String targetLabel,
+    bool isPriority = false,
+  }) async {
+    final uri = Uri.parse('$baseUrl/objects/register/save');
+
+    try {
+      final response = await http.post(
+        uri,
+        body: {
+          'name': name,
+          'target_label': targetLabel,
+          'is_priority': isPriority.toString(),
+        },
+      ).timeout(timeout);
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      throw Exception(
+          'Failed to save object registration: ${response.statusCode} ${response.body}');
+    } catch (e) {
+      throw Exception('Save object registration error: $e');
+    }
+  }
+
+  /// Object registration: discard buffered frames
+  static Future<Map<String, dynamic>> cancelObjectRegistration(String name) async {
+    final uri = Uri.parse('$baseUrl/objects/register/cancel');
+
+    try {
+      final response = await http.post(uri, body: {'name': name}).timeout(timeout);
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      throw Exception(
+          'Failed to cancel object registration: ${response.statusCode} ${response.body}');
+    } catch (e) {
+      throw Exception('Cancel object registration error: $e');
+    }
+  }
+
+  /// Object management: list all registered personalized objects
+  static Future<List<Map<String, dynamic>>> listRegisteredObjects() async {
+    final uri = Uri.parse('$baseUrl/objects/list');
+
+    try {
+      final response = await http.get(uri).timeout(timeout);
+      if (response.statusCode == 200) {
+        final payload = jsonDecode(response.body) as Map<String, dynamic>;
+        final objects = payload['objects'] as List<dynamic>? ?? const [];
+        return objects.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      }
+      throw Exception(
+          'Failed to list objects: ${response.statusCode} ${response.body}');
+    } catch (e) {
+      throw Exception('List objects error: $e');
+    }
+  }
+
+  /// Object registration: list valid YOLO labels for suggestions/dropdown
+  static Future<List<String>> listObjectLabels() async {
+    final uri = Uri.parse('$baseUrl/objects/labels');
+
+    try {
+      final response = await http.get(uri).timeout(timeout);
+      if (response.statusCode == 200) {
+        final payload = jsonDecode(response.body) as Map<String, dynamic>;
+        final labels = payload['labels'] as List<dynamic>? ?? const [];
+        return labels.map((e) => e.toString()).toList();
+      }
+      throw Exception(
+          'Failed to list object labels: ${response.statusCode} ${response.body}');
+    } catch (e) {
+      throw Exception('List object labels error: $e');
+    }
+  }
+
+  /// Object management: delete one registered object by id
+  static Future<Map<String, dynamic>> deleteRegisteredObject(
+      String objectId) async {
+    final uri = Uri.parse('$baseUrl/objects/${Uri.encodeComponent(objectId)}');
+
+    try {
+      final response = await http.delete(uri).timeout(timeout);
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      throw Exception(
+          'Failed to delete object: ${response.statusCode} ${response.body}');
+    } catch (e) {
+      throw Exception('Delete object error: $e');
+    }
+  }
+
+  /// Personalized recognition mode: faces + only registered objects
+  static Future<Map<String, dynamic>> detectRecognitionPersonalized(
+    File imageFile, {
+    double objectConfidenceThreshold = 0.5,
+    double faceConfidenceThreshold = 0.5,
+    bool recognizeFaces = true,
+    bool registeredOnly = true,
+  }) async {
+    final uri = Uri.parse('$baseUrl/detect/recognition-personalized').replace(
+      queryParameters: {
+        'object_confidence': objectConfidenceThreshold.toString(),
+        'face_confidence': faceConfidenceThreshold.toString(),
+        'recognize_faces': recognizeFaces.toString(),
+        'registered_only': registeredOnly.toString(),
+      },
+    );
+
+    try {
+      final request = http.MultipartRequest('POST', uri)
+        ..files.add(await http.MultipartFile.fromPath(
+          'file',
+          imageFile.path,
+          contentType: _imageMediaTypeForPath(imageFile.path),
+        ));
+
+      final response = await request.send().timeout(timeout);
+      final responseBody = await response.stream.bytesToString();
+
+      if (response.statusCode == 200) {
+        return jsonDecode(responseBody) as Map<String, dynamic>;
+      }
+      throw Exception(
+          'Failed personalized recognition: ${response.statusCode} $responseBody');
+    } catch (e) {
+      throw Exception('Personalized recognition error: $e');
+    }
+  }
+
   /// Detect objects in image
   /// Returns JSON response with detection results
   static Future<Map<String, dynamic>> detectObjects(

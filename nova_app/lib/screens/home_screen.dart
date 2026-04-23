@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -27,6 +28,8 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   CameraController? _controller;
   List<CameraDescription>? _cameras;
+  StreamSubscription<String>? _activationSub;
+  bool _isDisposed = false;
   NovaMode _currentMode = NovaMode.navigation;
   final FlutterTts _tts = FlutterTts();
   late ModeInferenceService _inferenceService;
@@ -62,7 +65,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _resumeNavigationAfterEmergency;
 
     // Listen for Activations (Native or Voice or Shake)
-    ActivationService.instance.onTrigger.listen((mode) {
+    _activationSub = ActivationService.instance.onTrigger.listen((mode) {
       print("Activation Triggered: $mode");
       if (mode == "NAVIGATION_MODE") {
         _onModeChanged(NovaMode.navigation);
@@ -413,7 +416,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         // Delay stream start by 300ms to avoid UI freeze during mode switch
         print('[NOVA DEBUG] Delaying stream start for 300ms...');
         await Future.delayed(const Duration(milliseconds: 300));
-        if (mounted &&
+        if (!_isDisposed &&
+            mounted &&
             _controller!.value.isInitialized &&
             !_controller!.value.isStreamingImages &&
             (_currentMode == NovaMode.navigation ||
@@ -724,15 +728,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
     // Unregister emergency callbacks to avoid leaks
     EmergencyService.instance.onNavigationPause = null;
     EmergencyService.instance.onNavigationResume = null;
-    if (_controller != null && _controller!.value.isStreamingImages) {
-      _controller!.stopImageStream();
+    _activationSub?.cancel();
+    ActivationService.instance.stopVoiceListener();
+    final controller = _controller;
+    _controller = null;
+    if (controller != null) {
+      unawaited(_releaseCameraController(controller));
     }
-    _controller?.dispose();
     super.dispose();
+  }
+
+  Future<void> _releaseCameraController(CameraController controller) async {
+    try {
+      if (controller.value.isInitialized &&
+          controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (e) {
+      print('[NOVA DEBUG] stopImageStream during release failed: $e');
+    }
+    try {
+      await controller.dispose();
+    } catch (e) {
+      print('[NOVA DEBUG] controller dispose failed: $e');
+    }
   }
 
   // ─── Emergency ↔ Navigation lifecycle ──────────────────────────────────────
@@ -740,12 +764,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     print('[NOVA DEBUG] AppLifecycleState changed: $state');
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      final controller = _controller;
+      _controller = null;
+      _isNavigationActive = false;
+      _inferenceInProgress = false;
+      _isProcessing = false;
+      if (controller != null) {
+        unawaited(_releaseCameraController(controller));
+      }
+      return;
+    }
+
     if (state == AppLifecycleState.resumed) {
       // App came back from phone call or other external activity
       if (!EmergencyService.instance.isActive) {
         // Emergency is over (call completed or was cancelled).
         // Re-initialize camera if needed.
-        print('[NOVA DEBUG] Resuming after emergency — reinitializing camera.');
+        print('[NOVA DEBUG] Resumed — reinitializing camera.');
         _reinitializeCameraAfterEmergency();
       } else {
         print(
@@ -764,12 +802,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (_controller != null &&
         _controller!.value.isInitialized &&
         _controller!.value.isStreamingImages) {
-      try {
-        _controller!.stopImageStream();
-        print('[NOVA DEBUG] ✓ Image stream stopped for emergency.');
-      } catch (e) {
-        print('[NOVA DEBUG] ❌ Error stopping stream for emergency: $e');
-      }
+      unawaited(() async {
+        try {
+          await _controller!.stopImageStream();
+          print('[NOVA DEBUG] ✓ Image stream stopped for emergency.');
+        } catch (e) {
+          print('[NOVA DEBUG] ❌ Error stopping stream for emergency: $e');
+        }
+      }());
     }
     if (mounted) setState(() {});
   }
@@ -797,6 +837,38 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       await _initializeCamera();
     } catch (e) {
       print('[NOVA DEBUG] ❌ Failed to reinitialize camera after emergency: $e');
+    }
+  }
+
+  Future<void> _pauseCameraSessionForNavigation() async {
+    final controller = _controller;
+    if (controller == null) return;
+    try {
+      if (controller.value.isInitialized && controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (e) {
+      print('[NOVA DEBUG] pause camera stopImageStream failed: $e');
+    }
+    try {
+      await controller.dispose();
+    } catch (e) {
+      print('[NOVA DEBUG] pause camera dispose failed: $e');
+    }
+    _controller = null;
+  }
+
+  Future<void> _resumeCameraSessionAfterSettings() async {
+    try {
+      _inferenceInProgress = false;
+      _isProcessing = false;
+      if (_controller == null || !_controller!.value.isInitialized) {
+        await _initializeCamera();
+      }
+      await _manageImageStream();
+      if (mounted) setState(() {});
+    } catch (e) {
+      print('[NOVA DEBUG] resume camera after settings failed: $e');
     }
   }
 
@@ -863,14 +935,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               left: 20,
               child: GestureDetector(
                 onTap: () async {
-                  await Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const SettingsScreen()),
-                  );
-                  // Reload settings after returning from settings screen
-                  await _loadSettings();
-                  await _initializeTTS();
-                  setState(() {});
+                  await _pauseCameraSessionForNavigation();
+                  try {
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                    );
+                  } finally {
+                    // Reload settings and re-acquire camera after returning
+                    await _loadSettings();
+                    await _initializeTTS();
+                    await _resumeCameraSessionAfterSettings();
+                  }
                 },
                 child: Container(
                   padding: const EdgeInsets.all(12),

@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.models.yolo_detector import YOLODetector
 from app.models.face_recognition_module.face_detector import FaceDetector
 from app.models.face_recognition_module.face_recognizer import FaceRecognizer
+from app.models.object_recognition_module.object_recognizer import ObjectRecognizer
 from app.models.midas_depth import MiDaSDepthEstimator
 from app.models.paddle_ocr import PaddleOCRDetector
 from app.services.preprocessing import ImagePreprocessor
@@ -21,7 +22,7 @@ from app.schemas.detection import (
     TextDetectionResponse, DepthEstimationResponse, NavigationGuidanceResponse
 )
 
-_RECOGNITION_THRESHOLD = 0.60  # minimum cosine similarity to call it a match
+_RECOGNITION_THRESHOLD = 0.50  # minimum cosine similarity to call it a match
 
 # Set up logging
 setup_logging()
@@ -31,6 +32,7 @@ logger = get_logger(__name__)
 yolo_detector = None
 face_detector = None
 face_recognizer = None
+object_recognizer = None
 
 router = APIRouter()
 
@@ -69,6 +71,18 @@ def get_face_recognizer():
             logger.error(f"Failed to initialize face recognizer: {str(e)}")
             raise HTTPException(status_code=500, detail="Face recognition model not available")
     return face_recognizer
+
+def get_object_recognizer():
+    """Get object recognizer instance, loading it if necessary."""
+    global object_recognizer
+    if object_recognizer is None:
+        try:
+            object_recognizer = ObjectRecognizer()
+            logger.info("Object recognizer initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize object recognizer: {str(e)}")
+            raise HTTPException(status_code=500, detail="Object recognizer not available")
+    return object_recognizer
 
 @router.post("/objects", response_model=ObjectDetectionResponse)
 async def detect_objects(
@@ -404,6 +418,113 @@ async def detect_all(
     except Exception as e:
         logger.error(f"Combined detection failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Detection failed")
+
+@router.post("/recognition-personalized")
+async def detect_recognition_personalized(
+    file: UploadFile = File(..., description="Image file to analyze"),
+    object_confidence: float = Query(default=0.5, ge=0.0, le=1.0, description="Object detection confidence threshold"),
+    face_confidence: float = Query(default=0.5, ge=0.0, le=1.0, description="Face detection confidence threshold"),
+    recognize_faces: bool = Query(default=True, description="Perform face recognition"),
+    registered_only: bool = Query(default=True, description="Return only registered objects")
+):
+    """
+    Personalized recognition mode endpoint.
+
+    Returns:
+      - face recognition results (known + unknown faces)
+      - only registered object matches (by label in Phase 1)
+    """
+    start_time = time.time()
+
+    try:
+        import cv2 as _cv2
+        import numpy as _np
+
+        image_bytes = await file.read()
+
+        # Object detections
+        image = ImagePreprocessor.validate_and_load_image(image_bytes, file.content_type)
+        object_processed = ImagePreprocessor.preprocess_for_yolo(image)
+        object_detector = get_yolo_detector()
+        object_detections = object_detector.detect(object_processed)
+        filtered_objects = DetectionPostprocessor.filter_detections_by_confidence(
+            object_detections, object_confidence
+        )
+
+        object_detections_dict = [d.dict() for d in filtered_objects]
+        obj_recognizer = get_object_recognizer()
+        recognized_objects, unrecognized_objects = obj_recognizer.recognize_objects(
+            object_detections_dict,
+            registered_only=registered_only,
+            confidence_threshold=object_confidence,
+        )
+
+        # Face detections + recognition
+        nparr = _np.frombuffer(image_bytes, _np.uint8)
+        frame = _cv2.imdecode(nparr, _cv2.IMREAD_COLOR)
+        if frame is None:
+            raise ValueError("Could not decode image for face detection")
+
+        face_det = get_face_detector()
+        boxes, kps_list_all, scores_all = face_det.detect(frame)
+        h_f, w_f = frame.shape[:2]
+
+        recognizer = get_face_recognizer() if recognize_faces else None
+
+        faces = []
+        for box, kps, score in zip(boxes, kps_list_all, scores_all):
+            if float(score) < face_confidence:
+                continue
+            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+            face_result = {
+                'confidence': float(score),
+                'bbox': {
+                    'left':   max(0.0, float(x1) / w_f),
+                    'top':    max(0.0, float(y1) / h_f),
+                    'right':  min(1.0, float(x2) / w_f),
+                    'bottom': min(1.0, float(y2) / h_f),
+                },
+                'embedding': None,
+                'person_id': None,
+            }
+            if recognize_faces and recognizer is not None:
+                try:
+                    face_crop = frame[max(0, y1):min(h_f, y2), max(0, x1):min(w_f, x2)]
+                    person_id = recognizer.recognize_face(
+                        face_crop,
+                        threshold=_RECOGNITION_THRESHOLD,
+                        frame=frame,
+                        coarse_box=[x1, y1, x2, y2],
+                        coarse_kps=kps.tolist() if hasattr(kps, 'tolist') else list(kps),
+                    )
+                    face_result['person_id'] = person_id
+                except Exception as e:
+                    logger.warning(f"Face recognition in /recognition-personalized failed: {e}")
+            faces.append(face_result)
+
+        inference_time = time.time() - start_time
+
+        result = {
+            "faces": faces,
+            "recognized_objects": recognized_objects,
+            "unrecognized_objects": unrecognized_objects,
+            "registered_only": registered_only,
+            "inference_time_ms": round(inference_time * 1000, 2),
+            "total_detections": len(faces) + len(recognized_objects),
+        }
+
+        logger.info(
+            f"Personalized recognition completed: {len(faces)} faces, "
+            f"{len(recognized_objects)} registered objects in {inference_time:.3f}s"
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Personalized recognition failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Personalized recognition failed")
 
 @router.get("/models/info")
 async def get_model_info():

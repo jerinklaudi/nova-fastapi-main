@@ -41,7 +41,8 @@ _DEFAULT_SFACE  = os.path.join(_MODELS_DIR, "sface.onnx")
 _DEFAULT_LMARK  = os.path.join(_MODELS_DIR, "github_landmark.onnx")
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-RECOGNITION_THRESHOLD = 0.60   # minimum cosine similarity to call it a match
+RECOGNITION_THRESHOLD = 0.50   # minimum cosine similarity to call it a match
+MIN_IDENTITY_MARGIN   = 0.01   # require best match to clearly beat the second-best
 MIN_LAPLACIAN_VAR     = 10.0   # below this → blurry / blank crop  (was 15.0)
 MIN_MEAN_INTENSITY    = 2.0    # below this → nearly-black crop     (was 5.0)
 
@@ -312,6 +313,7 @@ class FaceRecognizer:
 
         best_id = None
         best_sim = -1.0
+        second_best_sim = -1.0
 
         # Iterate identities in database
         for person_id in self.db.list_identities():
@@ -327,12 +329,35 @@ class FaceRecognizer:
             logger.debug("Similarity with '%s' = %.4f", person_id, similarity)
 
             if similarity > best_sim:
+                second_best_sim = best_sim
                 best_sim = similarity
                 best_id = person_id
+            elif similarity > second_best_sim:
+                second_best_sim = similarity
 
-        if best_sim >= threshold:
+        margin = best_sim - second_best_sim if second_best_sim > -1.0 else best_sim
+        if best_sim >= threshold and margin >= MIN_IDENTITY_MARGIN:
             logger.info("Face Match: '%s' | similarity=%.3f", best_id, best_sim)
             return best_id
+
+        # Some mobile camera frames are slightly noisier; allow a softer fallback
+        # when the top match is still clearly above the second best.
+        if best_sim >= (threshold - 0.06) and margin >= (MIN_IDENTITY_MARGIN + 0.01):
+            logger.info(
+                "Face Match (soft fallback): '%s' | similarity=%.3f | margin=%.3f",
+                best_id,
+                best_sim,
+                margin,
+            )
+            return best_id
+
+        logger.debug(
+            "Face not matched: best=%.3f second=%.3f margin=%.3f threshold=%.2f",
+            best_sim,
+            second_best_sim,
+            margin,
+            threshold,
+        )
         
         return None
 
