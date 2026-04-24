@@ -36,9 +36,19 @@ class NavigationGuidanceService:
         "dog",
         "cat",
         "scooter",
+        "chair",
+        "couch",
+        "sofa",
+        "bench",
+        "dining table",
+        "table",
+        "bed",
+        "potted plant",
     }
-    NAV_MIN_CONFIDENCE = 0.50
-    NAV_MIN_AREA_RATIO = 0.015
+    NAV_MIN_CONFIDENCE = 0.35
+    NAV_MIN_AREA_RATIO = 0.005
+    NAV_PERSON_MIN_CONFIDENCE = 0.25
+    NAV_PERSON_MIN_AREA_RATIO = 0.002
     
     def __init__(self):
         logger.info("=" * 60)
@@ -135,7 +145,29 @@ class NavigationGuidanceService:
         # Avoid constant false positives: require a meaningful area to be close.
         close_ratio = float(np.mean(close_areas))
         if close_ratio > 0.08:
-            warnings.append("Obstacle detected nearby")
+            height, width = depth_map.shape
+            third = max(1, width // 3)
+            left_ratio = float(np.mean(close_areas[:, :third]))
+            center_ratio = float(np.mean(close_areas[:, third: third * 2]))
+            right_ratio = float(np.mean(close_areas[:, third * 2:]))
+
+            zone_ratios = {
+                "left": left_ratio,
+                "center": center_ratio,
+                "right": right_ratio,
+            }
+            dominant_zone = max(zone_ratios, key=zone_ratios.get)
+            dominant_ratio = zone_ratios[dominant_zone]
+
+            if dominant_ratio >= 0.10:
+                if dominant_zone == "left":
+                    warnings.append("Danger on the left. Move right.")
+                elif dominant_zone == "right":
+                    warnings.append("Danger on the right. Move left.")
+                else:
+                    warnings.append("Danger ahead in the center. Proceed carefully.")
+            else:
+                warnings.append("Obstacle detected nearby")
         
         # Analyze depth gradients for steps or drop-offs
         try:
@@ -268,8 +300,11 @@ class NavigationGuidanceService:
             return direction
         else:
             # Obstacles only in center zone
+            if any(label == "person" for label, _, _ in center_zone_obstacles):
+                logger.info("Zone guidance: person centered, stop immediately")
+                return "Danger ahead in the center. Stop immediately"
             logger.info("Zone guidance: obstacles centered, proceed carefully")
-            return "Proceed carefully"
+            return "Danger ahead in the center. Proceed carefully"
     
     def _generate_guidance_text(self, 
                               alert_obstacles: List[DetectionResult],
@@ -356,23 +391,32 @@ class NavigationGuidanceService:
             if label not in self.NAV_ALERT_LABELS:
                 continue
 
-            if float(d.confidence) < self.NAV_MIN_CONFIDENCE:
+            min_confidence = (
+                self.NAV_PERSON_MIN_CONFIDENCE if label == "person" else self.NAV_MIN_CONFIDENCE
+            )
+            min_area_ratio = (
+                self.NAV_PERSON_MIN_AREA_RATIO if label == "person" else self.NAV_MIN_AREA_RATIO
+            )
+
+            if float(d.confidence) < min_confidence:
                 continue
 
             width = max(0.0, float(d.bbox.right) - float(d.bbox.left))
             height = max(0.0, float(d.bbox.bottom) - float(d.bbox.top))
             area_ratio = width * height
-            if area_ratio < self.NAV_MIN_AREA_RATIO:
+            if area_ratio < min_area_ratio:
                 continue
 
             filtered.append(d)
 
         logger.info(
-            "Navigation candidate filter: %d -> %d (labels=%s, min_conf=%.2f, min_area=%.3f)",
+            "Navigation candidate filter: %d -> %d (labels=%s, min_conf=person:%.2f/other:%.2f, min_area=person:%.3f/other:%.3f)",
             len(detections),
             len(filtered),
             sorted(self.NAV_ALERT_LABELS),
+            self.NAV_PERSON_MIN_CONFIDENCE,
             self.NAV_MIN_CONFIDENCE,
+            self.NAV_PERSON_MIN_AREA_RATIO,
             self.NAV_MIN_AREA_RATIO,
         )
         return filtered

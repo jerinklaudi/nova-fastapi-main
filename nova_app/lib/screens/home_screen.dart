@@ -844,7 +844,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final controller = _controller;
     if (controller == null) return;
     try {
-      if (controller.value.isInitialized && controller.value.isStreamingImages) {
+      if (controller.value.isInitialized &&
+          controller.value.isStreamingImages) {
         await controller.stopImageStream();
       }
     } catch (e) {

@@ -21,9 +21,9 @@ class DetectionOverlayPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     // Draw faces: Green if recognized, Red if unknown
     for (final face in faces) {
-      final bool isRecognized = face.personId != null && 
-                                face.personId!.isNotEmpty && 
-                                face.personId != 'unknown';
+      final bool isRecognized = face.personId != null &&
+          face.personId!.isNotEmpty &&
+          face.personId != 'unknown';
       final Color boxColor = isRecognized ? Colors.green : Colors.red;
       final String label = isRecognized ? face.personId! : 'Unknown person';
 

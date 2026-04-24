@@ -281,7 +281,8 @@ class _ObjectRegistrationScreenState extends State<ObjectRegistrationScreen> {
                   'priority': isPriority,
                 });
               },
-              child: const Text('Start Capture', style: TextStyle(color: Colors.yellow)),
+              child: const Text('Start Capture',
+                  style: TextStyle(color: Colors.yellow)),
             ),
           ],
         ),
@@ -549,7 +550,8 @@ class _ObjectRegistrationCaptureScreenState
         _framesAccepted++;
         if (mounted) {
           setState(() {
-            _status = 'Captured $_framesAccepted / $_targetFrames valid frames...';
+            _status =
+                'Captured $_framesAccepted / $_targetFrames valid frames...';
           });
         }
       } else {

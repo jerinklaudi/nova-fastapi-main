@@ -19,6 +19,14 @@ class ModeInferenceService {
     'bicycle',
     'dog',
     'cat',
+    'chair',
+    'couch',
+    'sofa',
+    'bench',
+    'dining table',
+    'table',
+    'bed',
+    'potted plant',
   };
 
   // === Recognition debounce ===
@@ -33,8 +41,10 @@ class ModeInferenceService {
 
   // === Navigation false-positive suppression ===
   static const int _minStableFramesForNavigation = 2;
-  static const double _navigationAlertMinConfidence = 0.50;
-  static const double _navigationMinAreaRatio = 0.015;
+  static const double _navigationAlertMinConfidence = 0.35;
+  static const double _navigationMinAreaRatio = 0.005;
+  static const double _navigationPersonMinConfidence = 0.25;
+  static const double _navigationPersonMinAreaRatio = 0.002;
   final Map<String, int> _navigationStreaks = {};
   static const Set<String> _navigationAlertLabels = {
     'person',
@@ -46,13 +56,20 @@ class ModeInferenceService {
     'dog',
     'cat',
     'scooter',
+    'chair',
+    'couch',
+    'sofa',
+    'bench',
+    'dining table',
+    'table',
+    'bed',
+    'potted plant',
   };
 
   // === Navigation guidance debounce ===
-  String _lastNavigationPhrase = '';
   String _lastNavigationCommand = 'PATH_CLEAR';
   DateTime _lastNavigationSpeechTime = DateTime(2000);
-  static const int _navigationCooldownSeconds = 10;
+  static const int _navigationCooldownSeconds = 12;
 
   ModeInferenceService({required this.tts});
 
@@ -121,47 +138,43 @@ class ModeInferenceService {
 
       // Build guidance from filtered obstacles to suppress random detections.
       final guidanceText = _buildNavigationGuidanceText(filteredObstacles);
-      final navCommand = _deriveNavigationCommandFromObstacles(filteredObstacles);
-      final objectSummary = filteredObstacles.isEmpty
-          ? ''
-          : filteredObstacles.map((d) => d.label).toSet().join(', ');
-      final warningSummary = response.guidance.safetyWarnings.join('. ');
-      final speechParts = <String>[];
+      final navCommand =
+          _deriveNavigationCommandFromObstacles(filteredObstacles);
       final commandSpeech = _navigationCommandSpeech(navCommand);
       final dangerDirection = _buildDangerDirectionPhrase(filteredObstacles);
-      if (objectSummary.isNotEmpty) {
-        final objectCount = filteredObstacles.length;
-        speechParts.add(
-            'Detected $objectSummary object${objectCount > 1 ? 's' : ''} ahead');
+      final warningSummary = response.guidance.safetyWarnings
+          .where((warning) => warning.trim().isNotEmpty)
+          .join('. ');
+      final hasDanger = filteredObstacles.isNotEmpty ||
+          warningSummary.toLowerCase().contains('danger') ||
+          navCommand != 'PATH_CLEAR';
+
+      String navigationSpeech = '';
+      if (hasDanger) {
+        navigationSpeech = _buildPriorityNavigationSpeech(
+          guidanceText: guidanceText,
+          dangerDirection: dangerDirection,
+          commandSpeech: commandSpeech,
+          warningSummary: warningSummary,
+        );
+      } else if (_lastNavigationCommand != 'PATH_CLEAR') {
+        // Announce clear path only once when transitioning from danger to safe.
+        navigationSpeech = 'Path clear.';
       }
-      if (dangerDirection.isNotEmpty) {
-        speechParts.add(dangerDirection);
-      }
-      if (commandSpeech.isNotEmpty) {
-        speechParts.add(commandSpeech);
-      }
-      if (warningSummary.isNotEmpty) {
-        speechParts.add(warningSummary);
-      }
-      final navigationSpeech =
-          _normalizeNavigationSpeech(speechParts.join('. '));
 
       if (navigationSpeech.isNotEmpty) {
         final now = DateTime.now();
         final timeSinceLastSpeech =
             now.difference(_lastNavigationSpeechTime).inSeconds;
         final cooldownPassed =
-            timeSinceLastSpeech >= _navigationCooldownSeconds;
+          timeSinceLastSpeech >= _navigationCooldownSeconds;
         final commandChanged = navCommand != _lastNavigationCommand;
-        final isDirectionalCommand = navCommand == 'MOVE_LEFT' ||
-            navCommand == 'MOVE_RIGHT' ||
-            navCommand == 'STOP';
+        // Speak commands on change/cooldown; "Path clear" only on transition.
+        final canSpeak = hasDanger
+            ? (commandChanged || cooldownPassed)
+            : (_lastNavigationCommand != 'PATH_CLEAR');
 
-        // Only speak if: (1) different phrase OR (2) enough time has passed
-        if (navigationSpeech != _lastNavigationPhrase ||
-            cooldownPassed ||
-            (isDirectionalCommand && commandChanged)) {
-          _lastNavigationPhrase = navigationSpeech;
+        if (canSpeak && navigationSpeech.isNotEmpty) {
           _lastNavigationCommand = navCommand;
           _lastNavigationSpeechTime = now;
           final volume = _computeNavigationVolume(filteredObstacles);
@@ -170,7 +183,7 @@ class ModeInferenceService {
           await tts.stop();
           await tts.setVolume(volume);
           await tts.speak(navigationSpeech);
-        } else {
+        } else if (navigationSpeech.isNotEmpty) {
           final remaining = _navigationCooldownSeconds - timeSinceLastSpeech;
           debugPrint(
               '[NAV][MODE] ⏱ Debounced (${remaining}s): "$navigationSpeech"');
@@ -219,6 +232,43 @@ class ModeInferenceService {
         RegExp(r'\bi see\b', caseSensitive: false), 'Detected');
     cleaned = cleaned.replaceAll(RegExp(r'\s+'), ' ');
     return cleaned;
+  }
+
+  String _buildPriorityNavigationSpeech({
+    required String guidanceText,
+    required String dangerDirection,
+    required String commandSpeech,
+    required String warningSummary,
+  }) {
+    final normalizedGuidance = _normalizeNavigationSpeech(guidanceText);
+    final normalizedDirection = _normalizeNavigationSpeech(dangerDirection);
+    final normalizedCommand = _normalizeNavigationSpeech(commandSpeech);
+    final normalizedWarnings = _normalizeNavigationSpeech(warningSummary);
+
+    if (normalizedDirection.isNotEmpty) {
+      if (normalizedCommand.isNotEmpty) {
+        return '$normalizedDirection. $normalizedCommand';
+      }
+      return normalizedDirection;
+    }
+
+    if (normalizedWarnings.toLowerCase().contains('danger')) {
+      return normalizedWarnings;
+    }
+
+    if (normalizedGuidance.isNotEmpty) {
+      return normalizedGuidance;
+    }
+
+    if (normalizedCommand.isNotEmpty) {
+      return normalizedCommand;
+    }
+
+    if (normalizedWarnings.isNotEmpty) {
+      return normalizedWarnings;
+    }
+
+    return '';
   }
 
   String _navigationCommandSpeech(String navCommand) {
@@ -440,9 +490,9 @@ class ModeInferenceService {
         final unknowns = faceResponse.faces
             .where((f) =>
                 f.confidence >= _minFaceConfidenceForRecognition &&
-            (f.personId == null ||
-              f.personId == 'unknown' ||
-              f.personId!.isEmpty))
+                (f.personId == null ||
+                    f.personId == 'unknown' ||
+                    f.personId!.isEmpty))
             .length;
         if (unknowns > 0) {
           parts.add(unknowns == 1
@@ -522,21 +572,25 @@ class ModeInferenceService {
       if (!_navigationAlertLabels.contains(label)) {
         continue;
       }
-      if (d.confidence < _navigationAlertMinConfidence) {
+
+      final minConfidence =
+          label == 'person' ? _navigationPersonMinConfidence : _navigationAlertMinConfidence;
+      final minAreaRatio =
+          label == 'person' ? _navigationPersonMinAreaRatio : _navigationMinAreaRatio;
+
+      if (d.confidence < minConfidence) {
         continue;
       }
 
       final width = (d.bbox.right - d.bbox.left).clamp(0.0, 1.0);
       final height = (d.bbox.bottom - d.bbox.top).clamp(0.0, 1.0);
       final area = width * height;
-      if (area < _navigationMinAreaRatio) {
+      if (area < minAreaRatio) {
         continue;
       }
 
       final cx = (d.bbox.left + d.bbox.right) / 2.0;
-      final zone = cx < 0.33
-          ? 'left'
-          : (cx > 0.67 ? 'right' : 'center');
+      final zone = cx < 0.33 ? 'left' : (cx > 0.67 ? 'right' : 'center');
       final key = 'nav:$label:$zone';
       final streak = (_navigationStreaks[key] ?? 0) + 1;
       _navigationStreaks[key] = streak;
@@ -570,9 +624,7 @@ class ModeInferenceService {
 
     if (best == null) return '';
     final cx = (best.bbox.left + best.bbox.right) / 2.0;
-    final side = cx < 0.40
-        ? 'left'
-        : (cx > 0.60 ? 'right' : 'center');
+    final side = cx < 0.40 ? 'left' : (cx > 0.60 ? 'right' : 'center');
     if (side == 'center') {
       return 'Danger ahead in center: ${best.label}';
     }

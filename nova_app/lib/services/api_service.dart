@@ -210,11 +210,13 @@ class ApiService {
   }
 
   /// Object registration: discard buffered frames
-  static Future<Map<String, dynamic>> cancelObjectRegistration(String name) async {
+  static Future<Map<String, dynamic>> cancelObjectRegistration(
+      String name) async {
     final uri = Uri.parse('$baseUrl/objects/register/cancel');
 
     try {
-      final response = await http.post(uri, body: {'name': name}).timeout(timeout);
+      final response =
+          await http.post(uri, body: {'name': name}).timeout(timeout);
       if (response.statusCode == 200) {
         return jsonDecode(response.body) as Map<String, dynamic>;
       }
