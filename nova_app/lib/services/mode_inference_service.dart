@@ -167,7 +167,7 @@ class ModeInferenceService {
         final timeSinceLastSpeech =
             now.difference(_lastNavigationSpeechTime).inSeconds;
         final cooldownPassed =
-          timeSinceLastSpeech >= _navigationCooldownSeconds;
+            timeSinceLastSpeech >= _navigationCooldownSeconds;
         final commandChanged = navCommand != _lastNavigationCommand;
         // Speak commands on change/cooldown; "Path clear" only on transition.
         final canSpeak = hasDanger
@@ -339,22 +339,225 @@ class ModeInferenceService {
     try {
       final result = await ApiService.recognizeText(imageFile);
       final response = TextDetectionResponse.fromJson(result);
+      final orderedRegions = _orderTextRegionsForReading(response.textRegions);
+      final spokenText = _buildReadingSpeech(orderedRegions);
 
-      if (response.textRegions.isEmpty) {
-        await tts.speak('No text detected');
+      await tts.stop();
+
+      if (spokenText.isEmpty) {
+        await tts.speak(
+          'No readable text detected. Move closer, hold steady, and try again.',
+        );
       } else {
-        final allText = response.textRegions.map((r) => r.text).join(' ');
-        await tts.speak('Text detected: $allText');
+        await tts.speak(spokenText);
       }
 
       return ModeInferenceResult.success(
-        textRegions: response.textRegions,
+        textRegions: orderedRegions,
         inferenceTimeMs: response.inferenceTimeMs ?? 0.0,
       );
     } catch (e) {
-      await tts.speak('Reading mode error');
+      await tts.speak('Reading mode error. Please try again.');
       return ModeInferenceResult.error(e.toString());
     }
+  }
+
+  List<TextRegion> _orderTextRegionsForReading(List<TextRegion> regions) {
+    final ordered = [...regions]
+      ..removeWhere((region) => region.text.trim().isEmpty)
+      ..sort((a, b) {
+        final topDelta = (a.bbox.top - b.bbox.top).abs();
+        if (topDelta > 0.03) {
+          return a.bbox.top.compareTo(b.bbox.top);
+        }
+        return a.bbox.left.compareTo(b.bbox.left);
+      });
+    return ordered;
+  }
+
+  String _buildReadingSpeech(List<TextRegion> regions) {
+    if (regions.isEmpty) {
+      return '';
+    }
+
+    final confidenceValues =
+        regions.map((region) => region.confidence).toList();
+    final averageConfidence =
+        confidenceValues.reduce((a, b) => a + b) / confidenceValues.length;
+
+    final lineText = _buildTextByLines(regions);
+    final fallbackText = _buildFallbackRawText(regions);
+    final bodyText = lineText.isNotEmpty ? lineText : fallbackText;
+
+    if (bodyText.isEmpty) {
+      return '';
+    }
+
+    if (averageConfidence < 0.45) {
+      return 'Text detected, but it may be unclear. $bodyText';
+    }
+
+    return 'Text detected. $bodyText';
+  }
+
+  String _buildTextByLines(List<TextRegion> regions) {
+    if (regions.isEmpty) {
+      return '';
+    }
+
+    final lines = <List<TextRegion>>[];
+    for (final region in regions) {
+      final text = region.text.trim();
+      if (text.isEmpty || _isLikelyOcrNoise(region)) {
+        continue;
+      }
+
+      List<TextRegion>? targetLine;
+      for (final line in lines) {
+        final avgTop =
+            line.map((r) => r.bbox.top).reduce((a, b) => a + b) / line.length;
+        if ((region.bbox.top - avgTop).abs() <= 0.035) {
+          targetLine = line;
+          break;
+        }
+      }
+
+      if (targetLine == null) {
+        lines.add([region]);
+      } else {
+        targetLine.add(region);
+      }
+    }
+
+    if (lines.isEmpty) {
+      return '';
+    }
+
+    lines.sort((a, b) {
+      final aTop = a.map((r) => r.bbox.top).reduce((x, y) => x + y) / a.length;
+      final bTop = b.map((r) => r.bbox.top).reduce((x, y) => x + y) / b.length;
+      return aTop.compareTo(bTop);
+    });
+
+    final lineTexts = <String>[];
+    for (final line in lines) {
+      line.sort((a, b) => a.bbox.left.compareTo(b.bbox.left));
+      final built = _buildSingleLineText(line);
+      if (built.isNotEmpty) {
+        lineTexts.add(built);
+      }
+    }
+
+    final merged = lineTexts.join('. ');
+    if (_isOnlyShortNumericResult([merged])) {
+      return '';
+    }
+    return merged;
+  }
+
+  String _buildSingleLineText(List<TextRegion> lineRegions) {
+    if (lineRegions.isEmpty) {
+      return '';
+    }
+
+    final buffer = StringBuffer();
+    TextRegion? previous;
+    for (final region in lineRegions) {
+      final text = region.text.trim();
+      if (text.isEmpty) {
+        continue;
+      }
+
+      if (previous == null) {
+        buffer.write(text);
+        previous = region;
+        continue;
+      }
+
+      final prevText = previous.text.trim();
+      final gap = region.bbox.left - previous.bbox.right;
+      final isCharJoin = prevText.length == 1 && text.length == 1;
+      final separator = (isCharJoin || gap < 0.012) ? '' : ' ';
+      buffer.write(separator);
+      buffer.write(text);
+      previous = region;
+    }
+
+    final finalLine = buffer.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (finalLine.isEmpty) {
+      return '';
+    }
+    if (_isOnlyShortNumericResult([finalLine])) {
+      return '';
+    }
+    return finalLine;
+  }
+
+  String _buildFallbackRawText(List<TextRegion> regions) {
+    final raw = regions
+        .map((region) => region.text.trim())
+        .where((text) => text.isNotEmpty)
+        .where((text) => !RegExp(r'^[^A-Za-z0-9]+$').hasMatch(text))
+        .toList();
+
+    if (raw.isEmpty || _isOnlyShortNumericResult(raw)) {
+      return '';
+    }
+
+    return raw.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
+  bool _isOnlyShortNumericResult(List<String> textParts) {
+    if (textParts.isEmpty) {
+      return false;
+    }
+
+    final compact = textParts.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    final numericOnly = compact.replaceAll(RegExp(r'[^0-9]'), '');
+    final hasOnlyDigitsAndSpaces = RegExp(r'^[0-9\s]+$').hasMatch(compact);
+
+    if (!hasOnlyDigitsAndSpaces) {
+      return false;
+    }
+
+    return numericOnly.length <= 2;
+  }
+
+  bool _isLikelyOcrNoise(TextRegion region) {
+    final text = region.text.trim();
+    if (text.isEmpty) {
+      return true;
+    }
+
+    final normalized = text.replaceAll(RegExp(r'\s+'), '');
+    if (normalized.isEmpty) {
+      return true;
+    }
+
+    // Ignore punctuation-only outputs and separators.
+    if (RegExp(r'^[^A-Za-z0-9]+$').hasMatch(normalized)) {
+      return true;
+    }
+
+    // Keep single-letter alpha tokens because OCR can split words by character.
+    if (RegExp(r'^[A-Za-z]$').hasMatch(normalized)) {
+      return false;
+    }
+
+    // Single-digit tokens are frequently false positives.
+    if (normalized.length == 1) {
+      if (RegExp(r'^\d$').hasMatch(normalized)) {
+        return region.confidence < 0.9;
+      }
+      return region.confidence < 0.55;
+    }
+
+    // Short pure numeric fragments are commonly false positives.
+    if (normalized.length == 2 && RegExp(r'^\d{1,2}$').hasMatch(normalized)) {
+      return region.confidence < 0.95;
+    }
+
+    return false;
   }
 
   /// Recognition mode: Detect faces and objects (with TTS debounce)
@@ -573,10 +776,12 @@ class ModeInferenceService {
         continue;
       }
 
-      final minConfidence =
-          label == 'person' ? _navigationPersonMinConfidence : _navigationAlertMinConfidence;
-      final minAreaRatio =
-          label == 'person' ? _navigationPersonMinAreaRatio : _navigationMinAreaRatio;
+      final minConfidence = label == 'person'
+          ? _navigationPersonMinConfidence
+          : _navigationAlertMinConfidence;
+      final minAreaRatio = label == 'person'
+          ? _navigationPersonMinAreaRatio
+          : _navigationMinAreaRatio;
 
       if (d.confidence < minConfidence) {
         continue;

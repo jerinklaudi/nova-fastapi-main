@@ -26,6 +26,8 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  static const double _modeSwipeVelocityThreshold = 700;
+
   CameraController? _controller;
   List<CameraDescription>? _cameras;
   StreamSubscription<String>? _activationSub;
@@ -69,6 +71,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       print("Activation Triggered: $mode");
       if (mode == "NAVIGATION_MODE") {
         _onModeChanged(NovaMode.navigation);
+      } else if (mode == "READ_TEXT_COMMAND") {
+        unawaited(_handleReadingCaptureRequest(fromVoice: true));
       } else if (mode == "RECOGNITION_MODE") {
         _onModeChanged(NovaMode.recognition);
       } else if (mode == "EMERGENCY_MODE") {
@@ -405,8 +409,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (_controller == null || !_controller!.value.isInitialized) return;
 
     final bool shouldStream = (_currentMode == NovaMode.navigation ||
-            _currentMode == NovaMode.recognition ||
-            _currentMode == NovaMode.reading) &&
+            _currentMode == NovaMode.recognition) &&
         _settings.autoDetection &&
         _isNavigationActive &&
         !EmergencyService.instance.isActive;
@@ -421,8 +424,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             _controller!.value.isInitialized &&
             !_controller!.value.isStreamingImages &&
             (_currentMode == NovaMode.navigation ||
-                _currentMode == NovaMode.recognition ||
-                _currentMode == NovaMode.reading) &&
+                _currentMode == NovaMode.recognition) &&
             _isNavigationActive &&
             !EmergencyService.instance.isActive) {
           try {
@@ -445,6 +447,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
       }
     }
+  }
+
+  Future<void> _handleReadingCaptureRequest({required bool fromVoice}) async {
+    if (EmergencyService.instance.isActive) {
+      print('[NOVA DEBUG] ⛔ Reading capture blocked — emergency active.');
+      return;
+    }
+
+    if (_currentMode != NovaMode.reading) {
+      if (fromVoice) {
+        _onModeChanged(NovaMode.reading);
+        await Future.delayed(const Duration(milliseconds: 350));
+      } else {
+        await _tts.stop();
+        await _tts.speak('Switch to reading mode to scan text.');
+        return;
+      }
+    }
+
+    if (_inferenceInProgress || _isProcessing) {
+      print('[NOVA DEBUG] ⏭️  Reading capture skipped: inference in progress');
+      if (!fromVoice) {
+        await _tts.stop();
+        await _tts.speak('Please wait. Processing in progress.');
+      }
+      return;
+    }
+
+    await _tts.stop();
+    await _tts.speak(fromVoice ? 'Reading text.' : 'Capturing text.');
+    await _captureAndProcess();
   }
 
   void _handleModeSwitch(bool isLeftSwipe) {
@@ -538,6 +571,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         await _controller!.startImageStream(_onFrameAvailable);
       }
     }
+  }
+
+  String _readingModeHint() {
+    return 'Tap the screen or say "read this" to read text.';
   }
 
   /// Navigation Mode: Obstacle detection + depth estimation + guidance
@@ -906,9 +943,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          if (_currentMode == NovaMode.reading) {
+            unawaited(_handleReadingCaptureRequest(fromVoice: false));
+          }
+        },
         onHorizontalDragEnd: (details) {
-          if (details.primaryVelocity == null) return;
-          _handleModeSwitch(details.primaryVelocity! < 0);
+          final velocity = details.primaryVelocity;
+          if (velocity == null) return;
+          if (velocity.abs() < _modeSwipeVelocityThreshold) return;
+          _handleModeSwitch(velocity < 0);
         },
         child: Stack(
           children: [
@@ -984,6 +1029,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               ),
             ),
+
+            if (_currentMode == NovaMode.reading)
+              Positioned(
+                top: 90,
+                left: 16,
+                right: 16,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.65),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.yellow.withOpacity(0.8)),
+                  ),
+                  child: Text(
+                    _readingModeHint(),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
 
             // Status indicator (top-right)
             Positioned(

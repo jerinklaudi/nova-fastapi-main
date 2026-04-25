@@ -35,6 +35,15 @@
       "samples_used": 20,
       "created_at": "2026-04-24T10:22:06.300462",
       "updated_at": "2026-04-24T10:22:06.300462"
+    },
+    {
+      "id": "e22dbd7a-0e49-4713-9fee-9a3327398eda",
+      "name": "Mervin's mouse",
+      "target_label": "mouse",
+      "is_priority": false,
+      "samples_used": 20,
+      "created_at": "2026-04-25T10:44:57.191274",
+      "updated_at": "2026-04-25T10:44:57.191274"
     }
   ]
 }

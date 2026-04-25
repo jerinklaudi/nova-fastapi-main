@@ -37,11 +37,12 @@ class DetectionOverlayPainter extends CustomPainter {
 
     // Draw text regions with blue bounding boxes
     for (final textRegion in textRegions) {
+      final label = _formatTextOverlayLabel(textRegion.text);
       _drawBoundingBox(
         canvas,
         textRegion.bbox,
         Colors.blue,
-        textRegion.text,
+        label,
       );
     }
 
@@ -54,6 +55,27 @@ class DetectionOverlayPainter extends CustomPainter {
         '${detection.label} (${(detection.confidence * 100).toStringAsFixed(0)}%)',
       );
     }
+  }
+
+  String _formatTextOverlayLabel(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) {
+      return '';
+    }
+
+    // Hide short numeric/punctuation fragments that clutter the reading overlay.
+    if (RegExp(r'^[0-9]{1,2}$').hasMatch(text)) {
+      return '';
+    }
+    if (RegExp(r'^[^A-Za-z0-9]+$').hasMatch(text)) {
+      return '';
+    }
+
+    // Keep overlay compact for readability.
+    if (text.length > 36) {
+      return '${text.substring(0, 36)}...';
+    }
+    return text;
   }
 
   /// Draw a single bounding box with label
@@ -78,6 +100,10 @@ class DetectionOverlayPainter extends CustomPainter {
       ..style = PaintingStyle.stroke;
 
     canvas.drawRect(rect, paint);
+
+    if (label.trim().isEmpty) {
+      return;
+    }
 
     // Draw label background
     final textPainter = TextPainter(

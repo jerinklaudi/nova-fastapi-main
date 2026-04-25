@@ -36,6 +36,70 @@ object_recognizer = None
 
 router = APIRouter()
 
+
+def _score_text_results(text_results):
+    """Score OCR result quality; higher is better for readable speech output."""
+    if not text_results:
+        return 0.0
+
+    total_conf = 0.0
+    total_chars = 0
+    alpha_chars = 0
+    alnum_regions = 0
+
+    for result in text_results:
+        text = (result.text or "").strip()
+        if not text:
+            continue
+
+        total_conf += float(result.confidence)
+        total_chars += len(text)
+        alpha_chars += sum(1 for ch in text if ch.isalpha())
+        if any(ch.isalnum() for ch in text):
+            alnum_regions += 1
+
+    if alnum_regions == 0:
+        return 0.0
+
+    avg_conf = total_conf / alnum_regions
+    # Favor readable, alphabetic content over tiny numeric fragments.
+    return (alpha_chars * 2.5) + total_chars + (avg_conf * 5.0) + (alnum_regions * 1.5)
+
+
+def _best_oriented_ocr_results(ocr_detector, image_np):
+    """Run OCR on 0/90/180/270 orientations and keep the best-scoring result."""
+    candidates = [
+        (0, image_np),
+        (90, np.rot90(image_np, 1)),
+        (180, np.rot90(image_np, 2)),
+        (270, np.rot90(image_np, 3)),
+    ]
+
+    best_score = -1.0
+    best_angle = 0
+    best_results = []
+
+    for angle, candidate in candidates:
+        try:
+            results = ocr_detector.detect_text(candidate)
+        except Exception as e:
+            logger.warning(f"OCR failed for rotation {angle}°: {str(e)}")
+            continue
+
+        score = _score_text_results(results)
+        logger.info(
+            f"OCR rotation {angle}°: regions={len(results)} score={score:.2f}"
+        )
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+            best_results = results
+
+    logger.info(
+        f"Selected OCR rotation {best_angle}° with score={best_score:.2f} and {len(best_results)} regions"
+    )
+    return best_results
+
 def get_yolo_detector():
     """Get YOLO detector instance, loading it if necessary."""
     global yolo_detector
@@ -640,8 +704,9 @@ async def detect_text(
             logger.error(f"Failed to initialize PaddleOCR detector: {str(e)}")
             raise HTTPException(status_code=500, detail="OCR model not available")
         
-        # Run text detection
-        text_results = ocr_detector.detect_text(np.array(image))
+        # Run text detection with orientation search to handle rotated camera captures.
+        image_np = np.array(image)
+        text_results = _best_oriented_ocr_results(ocr_detector, image_np)
         
         # Filter by confidence threshold
         filtered_results = [result for result in text_results if result.confidence >= confidence_threshold]
